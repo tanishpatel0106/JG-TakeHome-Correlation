@@ -23,7 +23,7 @@ from collections.abc import Iterator
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 
-from .config import BLOCK_ROWS, VALIDITY_EPS, WINDOW
+from .config import BLOCK_ROWS, HIST_BLOCK_ROWS, VALIDITY_EPS, WINDOW
 
 
 def prepare_window(
@@ -169,14 +169,15 @@ def histogram_pairwise(
     Z: np.ndarray,
     valid: np.ndarray,
     edges: np.ndarray,
-    block: int = BLOCK_ROWS,
+    block: int = HIST_BLOCK_ROWS,
     dtype: type[np.floating] = np.float32,
 ) -> np.ndarray:
     """Histogram of ``rho_ij`` over the upper triangle (``i < j``) of valid stocks.
 
     Built block by block: each block of rows is multiplied only against the
     columns to its right, so roughly half of the N x N products are formed and
-    peak memory is O(block * N).
+    peak memory is O(block * N). Small blocks keep each product in cache while
+    it is binned.
 
     Parameters
     ----------
@@ -213,12 +214,14 @@ def histogram_pairwise(
 
 def _uniform_bin_counts(values: np.ndarray, lo: float, hi: float, n_bins: int) -> np.ndarray:
     """Counts of ``values`` in ``n_bins`` equal bins on [lo, hi] (values clipped)."""
-    scaled = np.clip(values, lo, hi)
-    scaled -= lo
-    scaled *= n_bins / (hi - lo)
-    # scaled >= 0, so truncation is floor. Values equal to `hi` land in index
+    scale = n_bins / (hi - lo)
+    position = values * values.dtype.type(scale)
+    position -= values.dtype.type(lo * scale)
+    np.clip(position, 0, n_bins, out=position)
+    # position >= 0, so truncation is floor. Values equal to `hi` land in index
     # n_bins and are folded into the last (closed) bin.
-    counts = np.bincount(scaled.astype(np.intp).ravel(), minlength=n_bins + 1)
+    index = position.astype(np.uint8 if n_bins < 255 else np.intp)
+    counts = np.bincount(index.ravel(), minlength=n_bins + 1)
     counts[n_bins - 1] += counts[n_bins]
     return counts[:n_bins].astype(np.int64)
 

@@ -31,10 +31,10 @@ import pandas as pd
 from . import __version__, store
 from .clean import IssueCounts, clean_frame
 from .config import (
-    BLOCK_ROWS,
     DEFAULT_PROCESSED_DIR,
     DEFAULT_ZIP,
     HIST_BINS,
+    HIST_BLOCK_ROWS,
     HIST_RANGE,
     VALIDITY_EPS,
     WINDOW,
@@ -175,7 +175,7 @@ def _nonzero_issues(counts: IssueCounts) -> dict[str, int]:
 
 
 def daily_aggregates(
-    returns: np.ndarray, window: int, edges: np.ndarray, block: int = BLOCK_ROWS
+    returns: np.ndarray, window: int, edges: np.ndarray, block: int = HIST_BLOCK_ROWS
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Per-date ``n_valid``, mean rho, std rho and rho histogram.
 
@@ -209,7 +209,7 @@ def run_build(
     zip_path: str | Path,
     out_dir: str | Path,
     window: int = WINDOW,
-    block: int = BLOCK_ROWS,
+    block: int = HIST_BLOCK_ROWS,
 ) -> tuple[dict, dict[str, float]]:
     """Run the full build and publish artifacts to ``out_dir``.
 
@@ -295,7 +295,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--zip", type=Path, default=DEFAULT_ZIP, help="source zip (default: %(default)s)")
     parser.add_argument("--out", type=Path, default=DEFAULT_PROCESSED_DIR, help="artifact directory (default: %(default)s)")
     parser.add_argument("--window", type=int, default=WINDOW, help="window length in returns (default: %(default)s)")
-    parser.add_argument("--block", type=int, default=BLOCK_ROWS, help="rows per GEMM block (default: %(default)s)")
+    parser.add_argument("--block", type=int, default=HIST_BLOCK_ROWS, help="rows per histogram block (default: %(default)s)")
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     args = parser.parse_args(argv)
 

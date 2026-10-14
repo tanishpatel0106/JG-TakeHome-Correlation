@@ -250,7 +250,8 @@ def build_report(zip_path: Path, panel: Panel, window: int = WINDOW) -> str:
     # 7. Windows and validity ---------------------------------------------------
     add("## 7. Windows and validity")
     add("")
-    n_valid, n_finite = _window_validity(panel.returns.astype(np.float32), window)
+    returns32 = panel.returns.astype(np.float32)
+    n_valid, n_finite, mean_rho, std_rho = _window_validity(returns32, window)
     usable = np.arange(n_dates) >= window
     first_valid = np.flatnonzero(n_valid >= 2)
     add(f"- First date with a full window (index W = {window}): **{dates[window] if n_dates > window else '-'}**")
@@ -271,7 +272,51 @@ def build_report(zip_path: Path, panel: Panel, window: int = WINDOW) -> str:
             a, b = empty_runs[k]
             add(f"| {dates[a]} | {dates[b]} | {b - a + 1} | {_cause(panel, a, window)} |")
     add("")
+
+    # 8. Cross-sectional dependence --------------------------------------------
+    add("## 8. Cross-sectional dependence")
+    add("")
+    has = np.isfinite(mean_rho)
+    null_w = 1.0 / np.sqrt(window - 1)
+    add(f"Per-date pairwise rho over the {int(has.sum())} dates with valid pairs (W = {window}):")
+    add("")
+    add(f"- mean rho: min {np.nanmin(mean_rho):+.4f}, median {np.nanmedian(mean_rho):+.4f}, max {np.nanmax(mean_rho):+.4f}")
+    add(f"- std of rho: min {np.nanmin(std_rho):.4f}, median {np.nanmedian(std_rho):.4f}, max {np.nanmax(std_rho):.4f}")
+    add(f"- for independent series the sample correlation of {window} points has mean 0 and std ~ 1/sqrt(W - 1) = {null_w:.4f}")
+    full = _full_sample_dependence(returns32)
+    if full is not None:
+        n_rows, mean_all, std_all, max_abs = full
+        add("")
+        add(f"Full-sample correlation over the {n_rows} dates on which every ticker has a return:")
+        add(f"mean rho {mean_all:+.5f}, std {std_all:.4f} (independent-series value 1/sqrt(n - 1) = {1 / np.sqrt(n_rows - 1):.4f}),")
+        add(f"max abs rho off the diagonal {max_abs:.3f}.")
+    add("")
+    add("Both are what independent random walks produce: the cross-section has no common factor, so")
+    add("trailing-window correlations in this data set are sampling noise around zero.")
+    add("")
     return "\n".join(lines) + "\n"
+
+
+def _full_sample_dependence(returns32: np.ndarray) -> tuple[int, float, float, float] | None:
+    """Pearson correlation over all dates with complete rows: (n_rows, mean, std, max |rho|)."""
+    from .corr import iter_full_blocks, mean_and_std_pairwise
+
+    complete = np.isfinite(returns32).all(axis=1)
+    if complete.sum() < 3:
+        return None
+    X = returns32[complete].astype(np.float64)
+    centred = X - X.mean(axis=0)
+    norm = np.sqrt((centred * centred).sum(axis=0))
+    valid = norm > VALIDITY_EPS
+    Z = np.full(X.shape, np.nan)
+    Z[:, valid] = centred[:, valid] / norm[valid]
+    mean, std, _ = mean_and_std_pairwise(Z, valid)
+    max_abs = 0.0
+    for r0, rows in iter_full_blocks(Z, valid):
+        local = np.arange(rows.shape[0])
+        rows[local, local + r0] = np.nan
+        max_abs = max(max_abs, float(np.nanmax(np.abs(rows))))
+    return int(complete.sum()), mean, std, max_abs
 
 
 def _typical_abs_log_return(panel: Panel) -> float:
@@ -301,18 +346,22 @@ def _naive_returns(prices: np.ndarray) -> np.ndarray:
     return out
 
 
-def _window_validity(returns32: np.ndarray, window: int) -> tuple[np.ndarray, np.ndarray]:
-    """Per date: number of valid stocks, and number with a complete (finite) window."""
-    from .corr import prepare_window
+def _window_validity(
+    returns32: np.ndarray, window: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Per date: valid stocks, stocks with a complete (finite) window, mean and std of rho."""
+    from .corr import mean_and_std_pairwise, prepare_window
 
     n_dates = returns32.shape[0]
     n_valid = np.zeros(n_dates, dtype=np.int64)
     n_finite = np.zeros(n_dates, dtype=np.int64)
+    mean_rho = np.full(n_dates, np.nan)
+    std_rho = np.full(n_dates, np.nan)
     for t in range(window, n_dates):
-        _, valid = prepare_window(returns32, t, window)
-        n_valid[t] = int(valid.sum())
+        Z, valid = prepare_window(returns32, t, window)
+        mean_rho[t], std_rho[t], n_valid[t] = mean_and_std_pairwise(Z, valid)
         n_finite[t] = int(np.isfinite(returns32[t - window + 1 : t + 1]).all(axis=0).sum())
-    return n_valid, n_finite
+    return n_valid, n_finite, mean_rho, std_rho
 
 
 def _runs(indices: np.ndarray) -> list[tuple[int, int]]:

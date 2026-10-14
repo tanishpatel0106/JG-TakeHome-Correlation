@@ -1,7 +1,7 @@
 # Data audit
 
 - Source: `stock_data.zip` (60.3 MB, sha256 `ecab8196c97b44affa6c41985fd9fc50a571bcf2e74d19f45f3f6e2d7d09ffac`)
-- Generated: 2026-10-14T17:40:52+00:00 by corrlib 0.1.0 (`python -m corrlib.audit`)
+- Generated: 2026-10-14T17:49:25+00:00 by corrlib 0.1.0 (`python -m corrlib.audit`)
 - Window: W = 20 returns; validity threshold ||x - mean|| > 1e-12
 
 ## 1. Files and calendar
@@ -154,4 +154,19 @@ Std: first 0.0609, later 0.0609.
 | 2021-12-31 | 2022-01-27 | 20 | window spans the re-base on 2021-12-31 |
 | 2023-01-02 | 2023-01-27 | 20 | window spans the re-base on 2023-01-02 |
 | 2024-01-01 | 2024-01-26 | 20 | window spans the re-base on 2024-01-01 |
+
+## 8. Cross-sectional dependence
+
+Per-date pairwise rho over the 779 dates with valid pairs (W = 20):
+
+- mean rho: min -0.0001, median +0.0000, max +0.0002
+- std of rho: min 0.2293, median 0.2294, max 0.2296
+- for independent series the sample correlation of 20 points has mean 0 and std ~ 1/sqrt(W - 1) = 0.2294
+
+Full-sample correlation over the 891 dates on which every ticker has a return:
+mean rho +0.00001, std 0.0335 (independent-series value 1/sqrt(n - 1) = 0.0335),
+max abs rho off the diagonal 0.177.
+
+Both are what independent random walks produce: the cross-section has no common factor, so
+trailing-window correlations in this data set are sampling noise around zero.
 

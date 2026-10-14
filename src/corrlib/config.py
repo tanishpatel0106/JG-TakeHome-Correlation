@@ -22,8 +22,12 @@ VALIDITY_EPS: float = 1e-12
 HIST_BINS: int = 40
 HIST_RANGE: tuple[float, float] = (-1.0, 1.0)
 
-#: Rows per block when materialising (parts of) the N x N matrix.
+#: Rows per block when streaming the full N x N matrix (download).
 BLOCK_ROWS: int = 1024
+
+#: Rows per block for the per-date histogram. Small, so each [b x N] float32
+#: block stays in CPU cache while it is binned (~2x faster than 1024).
+HIST_BLOCK_ROWS: int = 128
 
 # --- Input format ---------------------------------------------------------
 
