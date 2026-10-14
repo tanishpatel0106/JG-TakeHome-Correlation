@@ -22,4 +22,8 @@ testpaths = ["tests"]
 # Repo root on sys.path so tests can import the `app` package.
 pythonpath = ["."]
 addopts = "-ra"
-filterwarnings = ["error::DeprecationWarning:corrlib.*"]
+filterwarnings = [
+    "error::DeprecationWarning:corrlib.*",
+    # Starlette nudges towards `httpx2`; the brief standardises on httpx.
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated",
+]

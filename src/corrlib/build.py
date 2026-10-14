@@ -227,7 +227,8 @@ def run_build(
 
     with stage("per-date aggregates", timings):
         returns32 = panel.returns.astype(np.float32)
-        edges = np.linspace(HIST_RANGE[0], HIST_RANGE[1], HIST_BINS + 1)
+        # Rounded so the stored edges read as -1.0, -0.95, ... rather than linspace noise.
+        edges = np.round(np.linspace(HIST_RANGE[0], HIST_RANGE[1], HIST_BINS + 1), 12)
         n_valid, mean, std, hist = daily_aggregates(returns32, window, edges, block)
 
     first_valid = np.flatnonzero(n_valid >= 2)

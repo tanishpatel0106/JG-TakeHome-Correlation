@@ -25,6 +25,9 @@ HIST_RANGE: tuple[float, float] = (-1.0, 1.0)
 #: Rows per block when streaming the full N x N matrix (download).
 BLOCK_ROWS: int = 1024
 
+#: Rows per block when streaming the float16 download (~2.5 MB per chunk at N = 5000).
+DOWNLOAD_BLOCK_ROWS: int = 256
+
 #: Rows per block for the per-date histogram. Small, so each [b x N] float32
 #: block stays in CPU cache while it is binned (~2x faster than 1024).
 HIST_BLOCK_ROWS: int = 128
