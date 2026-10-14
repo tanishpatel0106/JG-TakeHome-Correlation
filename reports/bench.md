@@ -1,54 +1,81 @@
 # Benchmarks
 
-- Generated: 2026-10-14T18:12:51+00:00 by `python scripts/bench.py` (corrlib 0.1.0)
-- Data: `stock_data.zip` -> 900 dates x 5,000 tickers, W = 20
-- Machine: Linux-6.18.44-fc-v114-x86_64-with-glibc2.39, 4 CPUs, Python 3.13.16, numpy 2.5.4
-- Method: in-process, 50 random calls per case after 3 warm-up calls (seed 0); returns memmapped and in the OS page cache
+Generated 2026-10-14T22:31:50+00:00 by `python scripts/bench.py --data data/processed --out reports/bench.md` (what `make bench` runs). Every number below was measured in that run; nothing is carried over from earlier reports.
 
-## API endpoints (FastAPI TestClient: routing, validation and JSON included)
+## Environment and data
 
-| case | request | p50 ms | p95 ms | max ms |
-|---|---|---:|---:|---:|
-| one-vs-all (top/bottom 20) | `GET /api/corr/{date}/stock/{ticker}?k=20` | 5.5 | 8.3 | 16.2 |
-| full row (N values) | `GET /api/corr/{date}/row/{ticker}` | 5.8 | 9.6 | 12.4 |
-| 100-ticker matrix | `GET /api/corr/{date}/matrix?tickers=<100>` | 8.6 | 11.3 | 13.3 |
-| 150-ticker matrix (max) | `GET /api/corr/{date}/matrix?tickers=<150>` | 11.8 | 15.6 | 18.5 |
-| pair series (all dates) | `GET /api/corr/pair?a=&b=` | 4.0 | 7.0 | 10.3 |
-| date summary + histogram | `GET /api/dates/{date}/summary` | 1.8 | 4.7 | 7.8 |
-| timeline | `GET /api/stats/timeline` | 2.2 | 3.6 | 5.1 |
-| meta (5,000 tickers) | `GET /api/meta` | 1.8 | 2.8 | 10.8 |
+- Machine: Linux-6.18.44-fc-v114-x86_64-with-glibc2.39, 4 logical CPUs, Python 3.13.16
+- Packages: corrlib 0.2.0, numpy 2.5.4, pandas 3.0.6, pyarrow 26.0.0, fastapi 0.143.1, starlette 1.8.0, uvicorn 0.54.0, httpx 0.28.1, corrlib (__version__) 0.2.0
+- Code: git f90ecfc
+- Store: `data/processed` -> snapshot `v0001-e724ede614dd` (Source data: stock_data.zip), 900 dates x 5,000 tickers, window 20
+- Seed 0; 3 untimed warm-up calls before every timed series
 
-## Full-matrix download (streamed float16 `.npy`)
+## 1. JSON endpoints, in-process ASGI (warm page cache)
 
-One date (2024-09-06), N x N = 5,000 x 5,000.
+FastAPI `TestClient`: routing, validation, computation and JSON serialisation; no network. Random dates/tickers, 50 timed calls each.
 
-| metric | value |
-|---|---:|
-| bytes | 50,000,128 (50.0 MB) |
-| wall time, real uvicorn over localhost (httpx client) | 0.25 s (204 MB/s) |
-| server RSS before -> peak while streaming (sampled every 2 ms) | 215 MB -> 215 MB (+0 MB) |
-| body generator alone, in-process | 0.20 s |
-| Python heap peak of the body generator (tracemalloc) | 13.2 MB |
+| request | n | p50 ms | p95 ms | max ms |
+|---|---:|---:|---:|---:|
+| one stock vs all, top/bottom 20 | 50 | 4.9 | 5.8 | 6.9 |
+| full row (5,000 values) | 50 | 4.9 | 6.4 | 12.8 |
+| 100-ticker matrix | 50 | 6.2 | 7.8 | 8.8 |
+| pair series (900 dates) | 50 | 2.6 | 3.6 | 4.5 |
+| date summary + histogram | 50 | 1.5 | 1.9 | 3.1 |
+| timeline | 50 | 2.0 | 2.7 | 3.0 |
+| meta | 50 | 2.0 | 2.3 | 2.4 |
 
-Server memory stays O(block x N): one row block of 256 x N float32 (5 MB) plus its float16
-copy, never the 100 MB float32 / 50 MB float16 matrix.
+## 2. JSON endpoints over HTTP (warm)
 
-## Core kernels (no HTTP)
+uvicorn subprocess (1 worker) on 127.0.0.1, httpx client with keep-alive, 30 timed calls each.
 
-| kernel | p50 ms | p95 ms | max ms |
-|---|---:|---:|---:|
-| prepare_window + one_vs_all | 1.00 | 1.30 | 3.58 |
-| prepare_window + subset_matrix (k=100) | 1.09 | 1.49 | 1.61 |
-| pair_series (T dates) | 0.44 | 0.64 | 0.71 |
-| prepare_window + mean/std aggregates | 1.60 | 1.92 | 2.14 |
-| prepare_window + histogram (build, per date) | 59.71 | 86.25 | 108.79 |
+| request | n | p50 ms | p95 ms | max ms |
+|---|---:|---:|---:|---:|
+| one stock vs all, top/bottom 20 | 30 | 5.1 | 7.1 | 9.3 |
+| full row (5,000 values) | 30 | 4.6 | 6.2 | 7.9 |
+| 100-ticker matrix | 30 | 5.8 | 6.4 | 7.7 |
+| pair series (900 dates) | 30 | 2.8 | 3.4 | 4.3 |
+| date summary + histogram | 30 | 1.5 | 1.8 | 2.2 |
 
-## Build (from manifest.json of these artifacts)
+## 3. Cold first requests
+
+5 samples. Each: evict `returns.npy` from the page cache (`posix_fadvise(DONTNEED)`; resident share afterwards, by `mincore`: 0.0% at most), start a fresh uvicorn process, then time its first one-stock request and first pair request over HTTP.
+
+| request | n | p50 ms | p95 ms | max ms |
+|---|---:|---:|---:|---:|
+| first one-stock-vs-all request | 5 | 44.3 | 51.1 | 51.3 |
+| first pair-series request | 5 | 59.4 | 73.5 | 75.8 |
+
+## 4. Full-matrix downloads over HTTP
+
+Date 2024-09-06, matrix 5,000 x 5,000. Each mode: 1 untimed warm-up, then 3 timed downloads; time = request sent to last byte received by the client. Server RSS sampled every 2 ms from /proc; peak is the highest sample across the timed runs. Bytes received were checked against `/download/info`.
+
+| dtype | format | bytes | median s | max s | MB/s (median) | server RSS before -> peak |
+|---|---|---:|---:|---:|---:|---|
+| float32 | npz | 100,085,580 | 0.21 | 0.31 | 483 | 191 MB -> 218 MB (+27 MB) |
+| float32 | npy | 100,000,128 | 0.19 | 0.23 | 523 | 191 MB -> 213 MB (+22 MB) |
+| float16 | npz | 50,085,580 | 0.30 | 0.33 | 169 | 191 MB -> 213 MB (+22 MB) |
+| float16 | npy | 50,000,128 | 0.20 | 0.26 | 253 | 213 MB -> 229 MB (+16 MB) |
+
+## 5. Concurrent mixed workload over HTTP
+
+8 client threads for 10.0 s against one uvicorn worker; each request is a random one-stock, row, 100-ticker matrix, pair or summary call.
+
+- completed requests: 2,991 (299 req/s), errors: 0
+- latency p50 26.9 ms, p95 38.5 ms, p99 43.9 ms
+
+## 6. Build / update timings (recorded by corrlib in the snapshot manifest)
+
+Snapshot `v0001-e724ede614dd` (kind full_build); seconds per stage as measured by `corrlib.build` / `corrlib.ingest` when it was built (not re-run by this benchmark).
 
 | stage | seconds |
 |---|---:|
-| hash source zip | 0.2 |
-| ingest + clean | 14.3 |
-| wide prices + returns | 4.8 |
-| per-date aggregates | 60.7 |
-| total before writing artifacts | 81.2 |
+| hash source zip | 0.16 |
+| ingest + clean | 10.95 |
+| wide prices + returns | 3.74 |
+| per-date aggregates | 46.48 |
+
+## Not measured
+
+- Multi-worker or multi-host deployments, remote networks, or other machines.
+- Downloads in parallel (the server allows 2 at a time; extra requests get HTTP 429).
+- Cold-cache behaviour beyond the first request of a fresh process.

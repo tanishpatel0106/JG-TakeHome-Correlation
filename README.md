@@ -218,21 +218,36 @@ python -m corrlib.snapshots --root data/processed list | verify | rollback ID | 
 
 ## 8. Performance
 
-Measured by `make bench` on the real data (900 × 5,000) on a 4-CPU Linux container. Full figures, method and cache state are in [`reports/bench.md`](reports/bench.md).
+Measured by `make bench` on the real data (snapshot `v0001-e724ede614dd`, 900 dates × 5,000 tickers) on a 4-CPU Linux container, Python 3.13, at commit `f90ecfc`. The full report, with method, cache state, sample sizes and package versions, is [`reports/bench.md`](reports/bench.md). Re-run `make bench` to regenerate it; `make bench-demo` benchmarks the synthetic store without the private data.
 
-| | Warm, in-process p50 |
-|---|---:|
-| one stock vs all (top/bottom 20) | ~6 ms |
-| 100-ticker matrix | ~9 ms |
-| pair over 900 dates | ~4 ms |
-| full float32 matrix (100 MB) streamed over HTTP | ~0.5 s |
+**JSON endpoints (p50 / p95 ms):**
 
-**Build times:**
-- full build from the zip: about 70 s;
-- demo full build: about 2 s;
-- demo append or correction: about 0.2 s.
+| Request | In-process ASGI, warm, n=50 | HTTP to uvicorn, warm, n=30 |
+|---|---:|---:|
+| one stock vs all (top/bottom 20) | 4.9 / 5.8 | 5.1 / 7.1 |
+| full row (5,000 values) | 4.9 / 6.4 | 4.6 / 6.2 |
+| 100-ticker matrix | 6.2 / 7.8 | 5.8 / 6.4 |
+| pair series (900 dates) | 2.6 / 3.6 | 2.8 / 3.4 |
+| date summary + histogram | 1.5 / 1.9 | 1.5 / 1.8 |
 
-These are single-machine, warm page-cache numbers, not guarantees. Cold reads add the cost of paging in 21 rows of `returns.npy`, which is small. Full-matrix downloads are CPU-bound and deliberately capped.
+**Cold first requests.** In a fresh server process right after `returns.npy` was evicted from the page cache (0% resident, checked with `mincore`), the first one-stock request took 44 ms and the first pair request 59 ms (p50, n=5). Most of that is the first request of a new process, not disk I/O.
+
+**Full-matrix downloads over HTTP** (2024-09-06, 5,000 × 5,000; median of 3 runs after a warm-up, request to last byte):
+
+| dtype | format | bytes | median | server RSS growth while streaming |
+|---|---|---:|---:|---:|
+| float32 (default) | npz (default) | 100,085,580 | 0.21 s | +27 MB |
+| float32 | npy | 100,000,128 | 0.19 s | +22 MB |
+| float16 | npz | 50,085,580 | 0.30 s | +22 MB |
+| float16 | npy | 50,000,128 | 0.20 s | +16 MB |
+
+Memory grows by tens of MB, not by the 100 MB matrix size, because the matrix is streamed in 256-row blocks. float16 is not faster: the float64 → float16 cast costs more than the bytes it saves.
+
+**Concurrency.** 8 client threads against one uvicorn worker, mixed JSON requests for 10 s: 299 req/s, p50 27 ms, p99 44 ms, no errors.
+
+**Build.** The full build of this snapshot took about 61 s in total (ingest 11 s, aggregates 46 s), as recorded in its manifest. On the demo data, an append and a correction each took ≈ 0.2 s end to end (see §7).
+
+These are single-machine numbers, not guarantees. Not measured: multiple workers or hosts, remote networks, parallel downloads (capped at 2), and other hardware.
 
 ---
 

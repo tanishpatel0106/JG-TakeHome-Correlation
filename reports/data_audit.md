@@ -1,7 +1,7 @@
 # Data audit
 
 - Source: `stock_data.zip` (60.3 MB, sha256 `ecab8196c97b44affa6c41985fd9fc50a571bcf2e74d19f45f3f6e2d7d09ffac`)
-- Generated: 2026-10-14T21:41:03+00:00 by corrlib 0.2.0 (`python -m corrlib.audit`)
+- Generated: 2026-10-14T22:32:51+00:00 by corrlib 0.2.0 (`python -m corrlib.audit`)
 - Window: W = 20 returns; validity threshold ||x - mean|| > 1e-12
 - View: **retrospective** (uniform-day decisions may use the next day's prices; see sections 4 and 9)
 
@@ -171,7 +171,7 @@ max abs rho off the diagonal 0.177.
 
 **Inference.** Criterion: |median mean rho| <= 0.01 and the median std within 2% of 0.2294.
 
-The per-date distribution of pairwise correlations is **consistent with the null benchmark of independent series**: these summary statistics show no detectable common factor at this window length.
+The per-date distribution of pairwise correlations is **consistent with the null benchmark of independent series**: at this window length these summary statistics do not reveal a common factor (absence of evidence, not evidence that none exists).
 
 **Limitations.**
 
