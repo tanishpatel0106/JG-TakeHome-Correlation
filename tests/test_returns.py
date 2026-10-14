@@ -4,8 +4,8 @@ from datetime import date
 
 import numpy as np
 import pandas as pd
-
 from conftest import FixtureData
+
 from corrlib.build import ingest
 from corrlib.returns import (
     classify_uniform_days,
@@ -74,9 +74,22 @@ def test_uniform_days_are_classified_by_continuity() -> None:
     P[9:] = 20.0 * path[9:] / path[8]
     uniform = find_uniform_days(P)
     assert np.flatnonzero(uniform).tolist() == [0, 4, 8]
-    rebase, placeholder = classify_uniform_days(P, uniform)
+    rebase, placeholder, unresolved = classify_uniform_days(P, uniform)
     assert np.flatnonzero(rebase).tolist() == [0, 8]
     assert np.flatnonzero(placeholder).tolist() == [4]
+    assert not unresolved.any()
+
+
+def test_uniform_last_date_is_unresolved() -> None:
+    P = np.full((4, 3), 20.0)
+    P[1:3] = [[21.0, 19.0, 20.5], [22.0, 18.0, 20.1]]
+    P[3] = 1.0
+    uniform = find_uniform_days(P)
+    assert np.flatnonzero(uniform).tolist() == [0, 3]
+    rebase, placeholder, unresolved = classify_uniform_days(P, uniform)
+    assert np.flatnonzero(rebase).tolist() == [0]
+    assert not placeholder.any()
+    assert np.flatnonzero(unresolved).tolist() == [3]
 
 
 def test_uniform_day_needs_coverage() -> None:
@@ -91,9 +104,15 @@ def test_fixture_panel_matches_ground_truth(fixture_data: FixtureData) -> None:
     assert panel.tickers == fixture_data.tickers
     assert panel.dates == fixture_data.dates
     np.testing.assert_allclose(panel.prices, fixture_data.expected_prices, rtol=1e-12, equal_nan=True)
+    np.testing.assert_allclose(panel.prices_raw, fixture_data.expected_prices, rtol=1e-12, equal_nan=True)
     # Day 0 is the uniform 20.0 seed: a re-base at t=0, which changes nothing.
     assert np.flatnonzero(panel.rebase).tolist() == [0]
-    assert not panel.placeholder.any()
+    assert not panel.placeholder.any() and not panel.unresolved.any()
+    assert [(r["date"], r["classification"], r["status"], r["action"]) for r in panel.anomalies] == [
+        ("2021-01-04", "rebase", "inferred", "none")
+    ]
+    assert len(panel.issues_by_date) == len(panel.dates)
+    assert sum(c.files for c in panel.issues_by_date) == len(panel.dates)
     np.testing.assert_allclose(
         panel.returns, simple_returns(fixture_data.expected_prices), rtol=1e-12, equal_nan=True
     )

@@ -155,6 +155,35 @@ def write_zip(path: Path, members: dict[str, str]) -> Path:
     return path
 
 
+def daily_csv_text(day: date, tickers: list[str], prices: np.ndarray) -> str:
+    """``Ticker,Date,Price`` text for one day; NaN prices are left out (ticker absent)."""
+    lines = ["Ticker,Date,Price"]
+    for j in range(len(tickers)):
+        if np.isfinite(prices[j]):
+            lines.append(f"{tickers[j]},{day.isoformat()},{prices[j]:.6f}")
+    return "\n".join(lines) + "\n"
+
+
+def write_price_zip(
+    path: Path, prices: np.ndarray, tickers: list[str], dates: list[date], comment: str | None = None
+) -> Path:
+    """Write a source zip from a ``[T x N]`` price matrix (NaN = row absent that day)."""
+    with zipfile.ZipFile(path, "w") as zf:
+        if comment is not None:
+            zf.comment = comment.encode("utf-8")
+        for t in range(len(dates)):
+            zf.writestr(f"d/{dates[t].strftime('%Y%m%d')}.csv", daily_csv_text(dates[t], tickers, prices[t]))
+    return path
+
+
+def random_walk_prices(n_dates: int, n_tickers: int, seed: int = 0, vol: float = 0.02) -> np.ndarray:
+    """float64 ``[T x N]`` positive prices starting at 20.0 (a uniform seed day at t = 0)."""
+    rng = np.random.default_rng(seed)
+    steps = rng.normal(0.0, vol, size=(n_dates, n_tickers))
+    steps[0] = 0.0
+    return np.round(20.0 * np.exp(np.cumsum(steps, axis=0)), 6)
+
+
 @pytest.fixture(scope="session")
 def fixture_data(tmp_path_factory: pytest.TempPathFactory) -> FixtureData:
     return make_fixture_zip(tmp_path_factory.mktemp("raw") / "stock_data.zip")
@@ -162,9 +191,40 @@ def fixture_data(tmp_path_factory: pytest.TempPathFactory) -> FixtureData:
 
 @pytest.fixture(scope="session")
 def built_dir(fixture_data: FixtureData, tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """Artifacts built from the fixture zip (shared by store and API tests)."""
+    """A store ROOT built from the fixture zip (shared by store and API tests; never mutate it).
+
+    ``run_build`` publishes one ``full_build`` snapshot (``v0001-<h12>``) and
+    points ``CURRENT`` at it; ``load_store(built_dir)`` resolves it. Tests that
+    ingest, roll back or prune work on a copy (``shutil.copytree``).
+    """
     from corrlib.build import run_build
 
     out = tmp_path_factory.mktemp("processed") / "processed"
     run_build(fixture_data.zip_path, out, window=FIXTURE_WINDOW, block=4)
+    return out
+
+
+@pytest.fixture(scope="session")
+def built_snapshot_dir(built_dir: Path) -> Path:
+    """The snapshot directory ``built_dir/snapshots/<id>`` that CURRENT names."""
+    from corrlib.store import resolve_snapshot_dir
+
+    return resolve_snapshot_dir(built_dir)[0]
+
+
+@pytest.fixture(scope="session")
+def demo_files(tmp_path_factory: pytest.TempPathFactory):
+    """The synthetic demo dataset (``corrlib.demo.generate_demo``) in a temp directory."""
+    from corrlib.demo import generate_demo
+
+    return generate_demo(tmp_path_factory.mktemp("demo") / "demo")
+
+
+@pytest.fixture(scope="session")
+def demo_store_dir(demo_files, tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A store ROOT built from the demo zip (dataset kind auto-detected as "demo"; never mutate it)."""
+    from corrlib.build import run_build
+
+    out = tmp_path_factory.mktemp("demo_store") / "store"
+    run_build(demo_files.zip_path, out)
     return out

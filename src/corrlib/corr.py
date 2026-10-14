@@ -6,8 +6,12 @@ Contract (see README, "Approach & math")
 * The window *as of* date index ``t`` is ``R[t-W+1 .. t]`` (W returns, W+1
   prices). The first date with a window is ``t = W``. For ``t < W`` nothing
   is valid, because the window would need ``R[0]``.
-* Stock ``i`` is **valid** at ``t`` iff its W returns are all finite and its
-  centred window norm is > ``eps`` (complete observations only).
+* Stock ``i`` is **valid** at ``t`` iff ``t >= W``, its W returns are all
+  finite and its centred window norm is > ``eps`` (complete observations
+  only). Every invalid stock gets a reason code (``config.REASON_*``):
+  1 insufficient_history, 2 missing_returns, 3 constant_returns.
+  :func:`window_status` is the one implementation of this rule;
+  :func:`reason_series` is its vectorised form over all dates for one column.
 * For valid ``i``: ``z_i = (x - mean x) / ||x - mean x||``. Then Pearson
   ``rho_ij = z_i . z_j`` exactly, i.e. ``C = Z^T Z``. Invalid stocks give NaN
   correlations with everything, including themselves.
@@ -23,13 +27,26 @@ from collections.abc import Iterator
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 
-from .config import BLOCK_ROWS, HIST_BLOCK_ROWS, VALIDITY_EPS, WINDOW
+from .config import (
+    BLOCK_ROWS,
+    HIST_BLOCK_ROWS,
+    REASON_CONSTANT_RETURNS,
+    REASON_INSUFFICIENT_HISTORY,
+    REASON_MISSING_RETURNS,
+    REASON_VALID,
+    VALIDITY_EPS,
+    WINDOW,
+)
 
 
-def prepare_window(
+def window_status(
     R: np.ndarray, t: int, W: int = WINDOW, eps: float = VALIDITY_EPS
-) -> tuple[np.ndarray, np.ndarray]:
-    """Standardised window matrix for date index ``t``.
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Standardised window matrix for date index ``t``, with a reason per stock.
+
+    This is the single implementation of the validity policy
+    (``config.build_policy``): every other function here either calls it or
+    applies the same three tests.
 
     Parameters
     ----------
@@ -44,25 +61,93 @@ def prepare_window(
 
     Returns
     -------
-    (Z, valid)
+    (Z, valid, reason)
         ``Z`` float64 ``[W x N]`` with unit-norm, zero-mean columns for valid
         stocks and NaN columns otherwise. ``valid`` bool ``[N]``.
-        For ``t < W`` every stock is invalid.
+        ``reason`` int8 ``[N]``: ``REASON_VALID`` (0) where valid, else
+        ``REASON_INSUFFICIENT_HISTORY`` (1, every stock when ``t < W``),
+        ``REASON_MISSING_RETURNS`` (2, any return in the window is NaN/inf) or
+        ``REASON_CONSTANT_RETURNS`` (3, complete window with norm <= eps).
     """
     n_dates, n_stocks = R.shape
     if not 0 <= t < n_dates:
         raise IndexError(f"date index {t} out of range [0, {n_dates})")
     Z = np.full((W, n_stocks), np.nan, dtype=np.float64)
     if t < W:
-        return Z, np.zeros(n_stocks, dtype=bool)
+        reason = np.full(n_stocks, REASON_INSUFFICIENT_HISTORY, dtype=np.int8)
+        return Z, np.zeros(n_stocks, dtype=bool), reason
 
     X = np.asarray(R[t - W + 1 : t + 1], dtype=np.float64)
     finite = np.isfinite(X).all(axis=0)
     centred = X - X.mean(axis=0)
     norm = np.sqrt(np.einsum("ij,ij->j", centred, centred))
-    valid = finite & (norm > eps)
+    reason = _reasons(finite, norm, eps)
+    valid = reason == REASON_VALID
     Z[:, valid] = centred[:, valid] / norm[valid]
+    return Z, valid, reason
+
+
+def _reasons(finite: np.ndarray, norm: np.ndarray, eps: float) -> np.ndarray:
+    """Reason codes (int8) from "all returns finite" and the centred norm (same shape)."""
+    reason = np.full(finite.shape, REASON_VALID, dtype=np.int8)
+    reason[finite & ~(norm > eps)] = REASON_CONSTANT_RETURNS
+    reason[~finite] = REASON_MISSING_RETURNS
+    return reason
+
+
+def prepare_window(
+    R: np.ndarray, t: int, W: int = WINDOW, eps: float = VALIDITY_EPS
+) -> tuple[np.ndarray, np.ndarray]:
+    """Standardised window matrix for date index ``t`` (no reasons).
+
+    Same as :func:`window_status` without the reason codes: returns ``(Z,
+    valid)`` with ``Z`` float64 ``[W x N]`` (NaN columns for invalid stocks)
+    and ``valid`` bool ``[N]``. For ``t < W`` every stock is invalid.
+    """
+    Z, valid, _ = window_status(R, t, W, eps)
     return Z, valid
+
+
+def reason_series(x: np.ndarray, W: int = WINDOW, eps: float = VALIDITY_EPS) -> np.ndarray:
+    """Reason code of one stock at every date: the vectorised :func:`window_status`.
+
+    Parameters
+    ----------
+    x:
+        One return column ``[T]`` (any float dtype).
+
+    Returns
+    -------
+    np.ndarray
+        int8 ``[T]``; ``out[t] == window_status(R, t, W, eps)[2][i]`` for the
+        column ``x = R[:, i]``. The first ``W`` values are
+        ``REASON_INSUFFICIENT_HISTORY``.
+    """
+    reason, _, _ = _column_windows(np.asarray(x, dtype=np.float64), W, eps)
+    return reason
+
+
+def _column_windows(
+    x: np.ndarray, W: int, eps: float
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Trailing windows of one float64 column.
+
+    Returns ``(reason int8 [T], centred float64 [T-W x W], norm float64 [T-W])``
+    where row ``k`` of ``centred``/``norm`` is the window ending at ``t = W + k``.
+    Empty arrays (0 rows) when ``T <= W``.
+    """
+    n_dates = x.shape[0]
+    reason = np.full(n_dates, REASON_INSUFFICIENT_HISTORY, dtype=np.int8)
+    if n_dates <= W:
+        return reason, np.empty((0, W)), np.empty(0)
+    # Window k covers indices k .. k+W-1 and ends at t = k + W - 1. Windows
+    # that may be valid end at t >= W, i.e. k >= 1.
+    xw = sliding_window_view(x, W)[1:]
+    finite = np.isfinite(xw).all(axis=1)
+    centred = xw - xw.mean(axis=1, keepdims=True)
+    norm = np.sqrt(np.einsum("ij,ij->i", centred, centred))
+    reason[W:] = _reasons(finite, norm, eps)
+    return reason, centred, norm
 
 
 def one_vs_all(Z: np.ndarray, valid: np.ndarray, i: int) -> np.ndarray:
@@ -232,14 +317,15 @@ def pair_series(
     """Trailing-window correlation of stocks ``i`` and ``j`` at every date. Cost O(T W).
 
     Computed directly from the two return columns with
-    ``sliding_window_view``, applying the same validity rule as
-    :func:`prepare_window` to both stocks.
+    ``sliding_window_view``; validity is :func:`reason_series` of each column,
+    i.e. exactly the rule of :func:`window_status`.
 
     Returns
     -------
     np.ndarray
         float64 ``[T]`` in [-1, 1]. The first ``W`` values are NaN. NaN wherever
-        either stock is invalid in that window.
+        either stock is invalid in that window (so ``pair_series(R, i, i)`` is
+        1.0 where ``i`` is valid and NaN elsewhere).
     """
     x = np.asarray(R[:, i], dtype=np.float64)
     y = np.asarray(R[:, j], dtype=np.float64)
@@ -248,16 +334,9 @@ def pair_series(
     if n_dates <= W:
         return out
 
-    # Window k covers indices k .. k+W-1 and ends at t = k + W - 1. Valid
-    # windows end at t >= W, i.e. k >= 1.
-    xw = sliding_window_view(x, W)[1:]
-    yw = sliding_window_view(y, W)[1:]
-    finite = np.isfinite(xw).all(axis=1) & np.isfinite(yw).all(axis=1)
-    xc = xw - xw.mean(axis=1, keepdims=True)
-    yc = yw - yw.mean(axis=1, keepdims=True)
-    nx = np.sqrt(np.einsum("ij,ij->i", xc, xc))
-    ny = np.sqrt(np.einsum("ij,ij->i", yc, yc))
-    ok = finite & (nx > eps) & (ny > eps)
+    reason_x, xc, nx = _column_windows(x, W, eps)
+    reason_y, yc, ny = _column_windows(y, W, eps)
+    ok = (reason_x[W:] == REASON_VALID) & (reason_y[W:] == REASON_VALID)
 
     rho = np.full(ok.shape, np.nan, dtype=np.float64)
     rho[ok] = np.einsum("ij,ij->i", xc[ok], yc[ok]) / (nx[ok] * ny[ok])
@@ -271,14 +350,20 @@ def top_bottom_k(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Indices of the ``k`` largest and ``k`` smallest finite values of ``row``.
 
-    NaN entries and ``exclude`` (e.g. the query stock itself) are ignored.
-    Selection uses ``argpartition`` (O(N)); only the selected k are sorted.
+    NaN entries and ``exclude`` (e.g. the query stock itself) are ignored, so
+    invalid stocks are never ranked. The order is a total order, so the result
+    is fully deterministic, including exact ties at the k-th boundary:
+
+    * ``top``: by value descending, then column index ascending;
+    * ``bottom``: by value ascending, then column index ascending.
+
+    ``-0.0`` and ``0.0`` compare equal (ties broken by index). Uses
+    ``np.lexsort`` over the finite candidates: O(N log N), ~0.3 ms at N = 5,000.
 
     Returns
     -------
     (top, bottom)
-        intp arrays of length ``min(k, n_candidates)``: ``top`` in descending
-        order of value, ``bottom`` in ascending order. They may overlap when
+        intp arrays of length ``min(k, n_candidates)``. They may overlap when
         there are fewer than ``2k`` candidates.
     """
     candidates = np.flatnonzero(np.isfinite(row))
@@ -288,9 +373,8 @@ def top_bottom_k(
     if k <= 0:
         empty = np.empty(0, dtype=np.intp)
         return empty, empty.copy()
-    values = row[candidates]
-    top = np.argpartition(-values, k - 1)[:k]
-    top = top[np.argsort(-values[top], kind="stable")]
-    bottom = np.argpartition(values, k - 1)[:k]
-    bottom = bottom[np.argsort(values[bottom], kind="stable")]
-    return candidates[top], candidates[bottom]
+    values = np.asarray(row[candidates], dtype=np.float64)
+    # np.lexsort sorts by the last key first; candidates are column indices.
+    top = np.lexsort((candidates, -values))[:k]
+    bottom = np.lexsort((candidates, values))[:k]
+    return candidates[top].astype(np.intp), candidates[bottom].astype(np.intp)

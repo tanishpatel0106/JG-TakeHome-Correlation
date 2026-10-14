@@ -3,7 +3,12 @@
 Runs the same ingest/clean pipeline as the build (see :func:`corrlib.build.ingest`)
 and writes a Markdown report with real numbers: calendar, tickers, every
 cleaning-issue counter, uniform-price days and how they were classified,
-coverage, the return distribution, and window validity.
+coverage, the return distribution, window validity, the cross-section compared
+with a null benchmark, and the anomaly records (status, evidence, look-ahead).
+
+Statistical wording is deliberately limited to what the numbers show: a match
+with the null benchmark of independent series is reported as *consistent
+with* that benchmark, never as proof of independence.
 """
 
 from __future__ import annotations
@@ -11,20 +16,26 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
 
 from . import __version__
-from .build import Panel, ingest
-from .config import DEFAULT_ZIP, REPORTS_DIR, VALIDITY_EPS, WINDOW
+from .build import Panel, ingest, read_overrides
+from .config import DEFAULT_ZIP, REPORTS_DIR, VALIDITY_EPS, VIEW, WINDOW
 from .io import sha256_file
+from .returns import OverrideError
 
 log = logging.getLogger("corrlib.audit")
 
 #: Calendar gaps longer than this many days are listed.
 GAP_DAYS = 4
+
+#: Tolerances for calling the per-date rho distribution "consistent with the
+#: null benchmark": |median mean rho| and |median std / (1/sqrt(W-1)) - 1|.
+NULL_MEAN_TOL = 0.01
+NULL_STD_REL_TOL = 0.02
 
 _ISSUE_DESCRIPTIONS = {
     "files": "daily files read",
@@ -56,8 +67,9 @@ def build_report(zip_path: Path, panel: Panel, window: int = WINDOW) -> str:
     add("# Data audit")
     add("")
     add(f"- Source: `{zip_path.name}` ({zip_path.stat().st_size / 1e6:.1f} MB, sha256 `{sha256_file(zip_path)}`)")
-    add(f"- Generated: {datetime.now(timezone.utc).isoformat(timespec='seconds')} by corrlib {__version__} (`python -m corrlib.audit`)")
+    add(f"- Generated: {datetime.now(UTC).isoformat(timespec='seconds')} by corrlib {__version__} (`python -m corrlib.audit`)")
     add(f"- Window: W = {window} returns; validity threshold ||x - mean|| > {VALIDITY_EPS:g}")
+    add(f"- View: **{VIEW}** (uniform-day decisions may use the next day's prices; see sections 4 and 9)")
     add("")
 
     # 1. Files and calendar ---------------------------------------------------
@@ -154,7 +166,7 @@ def build_report(zip_path: Path, panel: Panel, window: int = WINDOW) -> str:
     # 4. Uniform-price days -----------------------------------------------------
     add("## 4. Uniform-price days (every ticker has the same price)")
     add("")
-    uniform = np.flatnonzero(panel.rebase | panel.placeholder)
+    uniform = np.flatnonzero(panel.rebase | panel.placeholder | panel.unresolved)
     if uniform.size == 0:
         add("None.")
     else:
@@ -173,9 +185,12 @@ def build_report(zip_path: Path, panel: Panel, window: int = WINDOW) -> str:
             if panel.rebase[t]:
                 verdict = "re-base"
                 action = "keep prices; R[t] := NaN" if t > 0 else "keep (R[0] is NaN anyway)"
-            else:
+            elif panel.placeholder[t]:
                 verdict = "placeholder"
                 action = "prices := NaN"
+            else:
+                verdict = "unresolved (last date)"
+                action = "prices := NaN until the next day is known"
             add(
                 f"| {dates[t]} | {t} | {value:g} | {gap if gap is not None else '-'} | "
                 f"{_fmt(from_u)} | {_fmt(from_p)} | {verdict} | {action} |"
@@ -183,6 +198,9 @@ def build_report(zip_path: Path, panel: Panel, window: int = WINDOW) -> str:
         add("")
         add(f"- Returns set to NaN because they end on a re-base day: {panel.returns_nulled_at_rebase:,}")
         add(f"- Prices set to NaN on placeholder days: {panel.prices_nulled_on_placeholder_days:,}")
+        if panel.unresolved.any():
+            add(f"- Prices set to NaN on an unresolved last date: {panel.prices_nulled_pending:,}")
+        add("- The raw values are kept: `prices.parquet` stores `price_raw` (per-file cleaning only) next to `price` (used).")
     add("")
 
     # 5. Coverage ---------------------------------------------------------------
@@ -251,14 +269,14 @@ def build_report(zip_path: Path, panel: Panel, window: int = WINDOW) -> str:
     add("## 7. Windows and validity")
     add("")
     returns32 = panel.returns.astype(np.float32)
-    n_valid, n_finite, mean_rho, std_rho = _window_validity(returns32, window)
+    n_valid, n_constant, mean_rho, std_rho = _window_validity(returns32, window)
     usable = np.arange(n_dates) >= window
     first_valid = np.flatnonzero(n_valid >= 2)
     add(f"- First date with a full window (index W = {window}): **{dates[window] if n_dates > window else '-'}**")
     add(f"- First date with a valid pair: **{dates[int(first_valid[0])] if first_valid.size else '-'}**")
     total = int(usable.sum()) * n_tickers
     add(f"- Valid stock-dates (complete window and non-zero variance), over dates t >= W: **{int(n_valid[usable].sum()):,} of {total:,} ({n_valid[usable].sum() / max(total, 1):.2%})**")
-    add(f"- Stock-dates with a complete window but zero variance (flat prices): {int((n_finite - n_valid)[usable].sum()):,}")
+    add(f"- Stock-dates with a complete window but zero variance (`constant_returns`, flat prices): {int(n_constant[usable].sum()):,}")
     nonempty = n_valid[usable & (n_valid > 0)]
     if nonempty.size:
         add(f"- n_valid on dates that have any valid stock: min {nonempty.min():,}, median {int(np.median(nonempty)):,}, max {nonempty.max():,}")
@@ -274,26 +292,111 @@ def build_report(zip_path: Path, panel: Panel, window: int = WINDOW) -> str:
     add("")
 
     # 8. Cross-sectional dependence --------------------------------------------
-    add("## 8. Cross-sectional dependence")
+    add("## 8. Cross-sectional dependence compared with a null benchmark")
     add("")
     has = np.isfinite(mean_rho)
     null_w = 1.0 / np.sqrt(window - 1)
-    add(f"Per-date pairwise rho over the {int(has.sum())} dates with valid pairs (W = {window}):")
+    add(f"**Observation.** Per-date pairwise rho over the {int(has.sum())} dates with valid pairs (W = {window}):")
     add("")
-    add(f"- mean rho: min {np.nanmin(mean_rho):+.4f}, median {np.nanmedian(mean_rho):+.4f}, max {np.nanmax(mean_rho):+.4f}")
-    add(f"- std of rho: min {np.nanmin(std_rho):.4f}, median {np.nanmedian(std_rho):.4f}, max {np.nanmax(std_rho):.4f}")
-    add(f"- for independent series the sample correlation of {window} points has mean 0 and std ~ 1/sqrt(W - 1) = {null_w:.4f}")
+    if has.any():
+        add(f"- mean rho: min {np.nanmin(mean_rho):+.4f}, median {np.nanmedian(mean_rho):+.4f}, max {np.nanmax(mean_rho):+.4f}")
+        add(f"- std of rho: min {np.nanmin(std_rho):.4f}, median {np.nanmedian(std_rho):.4f}, max {np.nanmax(std_rho):.4f}")
+    add(
+        f"- **Null benchmark** (an assumption, not a fact about the data): for independent normal series the sample "
+        f"correlation of {window} returns has mean 0 and std ~ 1/sqrt(W - 1) = {null_w:.4f}"
+    )
     full = _full_sample_dependence(returns32)
     if full is not None:
         n_rows, mean_all, std_all, max_abs = full
         add("")
         add(f"Full-sample correlation over the {n_rows} dates on which every ticker has a return:")
-        add(f"mean rho {mean_all:+.5f}, std {std_all:.4f} (independent-series value 1/sqrt(n - 1) = {1 / np.sqrt(n_rows - 1):.4f}),")
+        add(f"mean rho {mean_all:+.5f}, std {std_all:.4f} (null benchmark 1/sqrt(n - 1) = {1 / np.sqrt(n_rows - 1):.4f}),")
         add(f"max abs rho off the diagonal {max_abs:.3f}.")
     add("")
-    add("Both are what independent random walks produce: the cross-section has no common factor, so")
-    add("trailing-window correlations in this data set are sampling noise around zero.")
+    if has.any():
+        median_mean = float(np.nanmedian(mean_rho))
+        median_std = float(np.nanmedian(std_rho))
+        consistent = abs(median_mean) <= NULL_MEAN_TOL and abs(median_std / null_w - 1.0) <= NULL_STD_REL_TOL
+        add(
+            f"**Inference.** Criterion: |median mean rho| <= {NULL_MEAN_TOL} and the median std within "
+            f"{NULL_STD_REL_TOL:.0%} of {null_w:.4f}."
+        )
+        add("")
+        if consistent:
+            add(
+                "The per-date distribution of pairwise correlations is **consistent with the null benchmark of "
+                "independent series**: these summary statistics show no detectable common factor at this window length."
+            )
+        else:
+            add(
+                f"The per-date distribution **departs from the null benchmark of independent series** "
+                f"(median mean rho {median_mean:+.4f}, median std {median_std:.4f} vs {null_w:.4f}): "
+                "a positive mean and a wider spread are what common (market or sector) factors produce."
+            )
+        add("")
+    n_peers = int(np.nanmax(n_valid)) - 1 if n_valid.size and np.nanmax(n_valid) > 1 else 0
+    add("**Limitations.**")
     add("")
+    add(
+        "- A benchmark match is not a proof: it does **not** show that the stocks are independent, that no "
+        "common factor exists, or that every individual correlation is noise. Weak or intermittent dependence, "
+        "or dependence confined to a few pairs, can hide inside a distribution that matches the benchmark."
+    )
+    add(
+        f"- A {window}-return correlation is a noisy estimate: around rho = 0 its 95% interval (Fisher z) is about "
+        f"+/-{np.tanh(1.96 / np.sqrt(window - 3)):.2f}, so measured rho, its uncertainty and any economic "
+        "usefulness are different things."
+    )
+    if n_peers > 0:
+        add(
+            f"- Multiple comparisons: among {n_peers:,} peers the largest |rho| of independent series is typically "
+            f"about {_null_max_abs_rho(window, n_peers):.2f} (median of the maximum under the benchmark), so an "
+            "extreme top/bottom neighbour is expected by chance and does not establish a stable relationship."
+        )
+    add("")
+
+    # 9. Anomaly records ----------------------------------------------------------
+    add("## 9. Anomaly records (status, evidence, look-ahead)")
+    add("")
+    records = panel.anomalies
+    if not records:
+        add("No uniform-price days, so no records.")
+    else:
+        add(
+            "One record per uniform-price day, exactly as stored in `anomalies.json`. *Status* is `inferred` "
+            "(decided by the rule), `confirmed` (an override file set it) or `unresolved` (cannot be decided yet). "
+            "*Look-ahead* means the rule used prices from a later date, so the cleaned history is a "
+            f"**{VIEW}** view, not a point-in-time one."
+        )
+        add("")
+        add("| date | classification | status | rule | look-ahead | observation dates | from uniform / from previous (n) | action | affected window ends | override |")
+        add("|---|---|---|---|---|---|---|---|---|---|")
+        for k in range(len(records)):
+            rec = records[k]
+            ev = rec["evidence"]
+            numbers = "-"
+            if ev.get("median_abs_log_from_uniform") is not None:
+                numbers = (
+                    f"{ev['median_abs_log_from_uniform']:.4f} / {ev['median_abs_log_from_previous']:.4f} "
+                    f"({ev['n_compared']:,})"
+                )
+            ends = rec["affected"]["window_end_dates"]
+            span = f"{ends['first']} .. {ends['last']} ({ends['count']})" if ends["count"] else "none"
+            override = "-"
+            if rec.get("override"):
+                ov = rec["override"]
+                override = f"{ov['classification']} by {ov['author']}: {ov['reason']}"
+            add(
+                f"| {rec['date']} | {rec['classification']} | {rec['status']} | `{rec['rule']}` | "
+                f"{'yes' if rec['look_ahead'] else 'no'} | {', '.join(rec['observation_dates_used'])} | {numbers} | "
+                f"`{rec['action']}` | {span} | {override} |"
+            )
+        add("")
+        add("Evidence notes:")
+        add("")
+        for k in range(len(records)):
+            add(f"- {records[k]['date']}: {records[k]['evidence']['note']}")
+        add("")
     return "\n".join(lines) + "\n"
 
 
@@ -319,11 +422,26 @@ def _full_sample_dependence(returns32: np.ndarray) -> tuple[int, float, float, f
     return int(complete.sum()), mean, std, max_abs
 
 
+def _null_max_abs_rho(window: int, n_peers: int) -> float:
+    """Median of the largest |rho| among ``n_peers`` independent null draws (W = ``window``).
+
+    Under the benchmark (independent normal series, n = W points) the sample
+    correlation has density proportional to ``(1 - r^2)^((n - 4) / 2)`` on
+    [-1, 1]. The median of the maximum of ``m`` i.i.d. |r| is the
+    ``0.5^(1/m)`` quantile of |r|, found on a fine grid (no scipy needed).
+    """
+    grid = np.linspace(0.0, 1.0, 200_001)
+    density = np.power(np.clip(1.0 - grid * grid, 0.0, None), (window - 4) / 2.0)
+    cdf = np.concatenate([[0.0], np.cumsum(0.5 * (density[1:] + density[:-1]) * np.diff(grid))])
+    cdf /= cdf[-1]
+    return float(np.interp(0.5 ** (1.0 / n_peers), cdf, grid))
+
+
 def _typical_abs_log_return(panel: Panel) -> float:
     """Median |log return| over ordinary days (excluding returns into/out of uniform days)."""
     logp = np.log(panel.prices_raw)
     diffs = np.diff(logp, axis=0)
-    special = panel.rebase | panel.placeholder
+    special = panel.rebase | panel.placeholder | panel.unresolved
     keep = ~(special[1:] | special[:-1])
     values = np.abs(diffs[keep])
     return float(np.nanmedian(values))
@@ -349,19 +467,20 @@ def _naive_returns(prices: np.ndarray) -> np.ndarray:
 def _window_validity(
     returns32: np.ndarray, window: int
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Per date: valid stocks, stocks with a complete (finite) window, mean and std of rho."""
-    from .corr import mean_and_std_pairwise, prepare_window
+    """Per date: valid stocks, ``constant_returns`` stocks, mean and std of rho (via ``window_status``)."""
+    from .config import REASON_CONSTANT_RETURNS
+    from .corr import mean_and_std_pairwise, window_status
 
     n_dates = returns32.shape[0]
     n_valid = np.zeros(n_dates, dtype=np.int64)
-    n_finite = np.zeros(n_dates, dtype=np.int64)
+    n_constant = np.zeros(n_dates, dtype=np.int64)
     mean_rho = np.full(n_dates, np.nan)
     std_rho = np.full(n_dates, np.nan)
     for t in range(window, n_dates):
-        Z, valid = prepare_window(returns32, t, window)
+        Z, valid, reason = window_status(returns32, t, window)
         mean_rho[t], std_rho[t], n_valid[t] = mean_and_std_pairwise(Z, valid)
-        n_finite[t] = int(np.isfinite(returns32[t - window + 1 : t + 1]).all(axis=0).sum())
-    return n_valid, n_finite, mean_rho, std_rho
+        n_constant[t] = int((reason == REASON_CONSTANT_RETURNS).sum())
+    return n_valid, n_constant, mean_rho, std_rho
 
 
 def _runs(indices: np.ndarray) -> list[tuple[int, int]]:
@@ -378,13 +497,13 @@ def _runs(indices: np.ndarray) -> list[tuple[int, int]]:
 
 def _cause(panel: Panel, start: int, window: int) -> str:
     """Explain an empty-window run by the nearest uniform day at or before its start."""
-    special = np.flatnonzero((panel.rebase | panel.placeholder)[: start + 1])
+    special = np.flatnonzero((panel.rebase | panel.placeholder | panel.unresolved)[: start + 1])
     if special.size == 0:
         return "missing returns"
     t = int(special[-1])
     if start - t > window:
         return "missing returns"
-    kind = "re-base" if panel.rebase[t] else "placeholder day"
+    kind = "re-base" if panel.rebase[t] else ("placeholder day" if panel.placeholder[t] else "unresolved last date")
     return f"window spans the {kind} on {panel.dates[t]}"
 
 
@@ -404,12 +523,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--zip", type=Path, default=DEFAULT_ZIP, help="source zip (default: %(default)s)")
     parser.add_argument("--out", type=Path, default=REPORTS_DIR / "data_audit.md", help="report path (default: %(default)s)")
     parser.add_argument("--window", type=int, default=WINDOW, help="window length (default: %(default)s)")
+    parser.add_argument("--overrides", type=Path, default=None, help="JSON overrides of uniform-day classifications")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s", datefmt="%H:%M:%S")
     if not args.zip.is_file():
         log.error("source zip not found: %s (pass --zip PATH)", args.zip)
         return 2
-    panel = ingest(args.zip)
+    try:
+        entries = read_overrides(args.overrides).entries if args.overrides is not None else None
+        panel = ingest(args.zip, window=args.window, overrides=entries)
+    except OverrideError as exc:
+        log.error("invalid overrides: %s", exc)
+        return 2
     report = build_report(args.zip, panel, args.window)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(report, encoding="utf-8")

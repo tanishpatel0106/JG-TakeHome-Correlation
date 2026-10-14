@@ -188,3 +188,44 @@ def test_top_bottom_k_ignores_nan_and_self() -> None:
     assert len(top) == 5 and 2 not in top and 0 not in top
     empty_top, empty_bottom = top_bottom_k(np.full(4, np.nan), 3)
     assert empty_top.size == 0 and empty_bottom.size == 0
+
+
+def _reference_order(row: np.ndarray, exclude: int | None, descending: bool) -> list[int]:
+    """Plain-Python total order: (value desc|asc, index asc) over finite, non-excluded entries."""
+    keys = [(-row[j] if descending else row[j], j) for j in range(len(row)) if np.isfinite(row[j]) and j != exclude]
+    return [j for _, j in sorted(keys)]
+
+
+def test_top_bottom_k_breaks_thousands_of_exact_ties_by_index() -> None:
+    rng = np.random.default_rng(0)
+    n = 5000
+    # Only five distinct values: thousands of exact ties, including at the k-th boundary.
+    row = rng.choice(np.array([-0.5, -0.25, 0.0, 0.25, 0.5]), size=n)
+    row[rng.choice(n, 300, replace=False)] = np.nan
+    row[17] = -0.0  # compares equal to 0.0
+    for k in (1, 7, 200, 999, 1000, 1001, 4000):
+        top, bottom = top_bottom_k(row, k, exclude=3)
+        assert top.tolist() == _reference_order(row, 3, True)[:k]
+        assert bottom.tolist() == _reference_order(row, 3, False)[:k]
+        assert top.dtype == np.intp and bottom.dtype == np.intp
+
+
+def test_top_bottom_k_all_equal_row_is_index_ordered() -> None:
+    row = np.full(3000, 0.125)
+    top, bottom = top_bottom_k(row, 50, exclude=0)
+    assert top.tolist() == list(range(1, 51))
+    assert bottom.tolist() == list(range(1, 51))
+
+
+def test_top_bottom_k_is_independent_of_memory_layout_and_repeatable() -> None:
+    rng = np.random.default_rng(1)
+    row = np.round(rng.normal(0, 0.3, 5000), 2)  # ~200 distinct values -> many ties
+    first = top_bottom_k(row, 20, exclude=10)
+    for _ in range(5):
+        again = top_bottom_k(row.copy(), 20, exclude=10)
+        np.testing.assert_array_equal(again[0], first[0])
+        np.testing.assert_array_equal(again[1], first[1])
+    strided = np.empty(10000)
+    strided[::2] = row
+    np.testing.assert_array_equal(top_bottom_k(strided[::2], 20, exclude=10)[0], first[0])
+    np.testing.assert_array_equal(top_bottom_k(row.astype(np.float32), 20, exclude=10)[0], first[0])
