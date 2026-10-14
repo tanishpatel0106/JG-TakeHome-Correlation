@@ -2,7 +2,7 @@
 
 Run with ``uvicorn app.api.main:app --port 8000``. The artifact directory is
 ``CORR_DATA_DIR`` (default ``data/processed``); it is loaded once at startup.
-If ``app/web/dist`` exists (``npm run build``), the built frontend is served at ``/``.
+Once ``app/web/dist`` exists (``npm run build``), the built frontend is served at ``/``.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from corrlib import __version__
 from corrlib.config import CORS_ORIGINS, DATA_DIR_ENV, DEFAULT_PROCESSED_DIR
@@ -27,6 +28,15 @@ from .schemas import ORJSONResponse
 log = logging.getLogger("app.api")
 
 WEB_DIST = Path(__file__).resolve().parents[1] / "web" / "dist"
+
+
+class FrontendFiles(StaticFiles):
+    """The built UI. Until ``npm run build`` has produced the directory, a JSON 404."""
+
+    async def check_config(self) -> None:
+        if self.directory is None or not Path(self.directory).is_dir():
+            raise StarletteHTTPException(404, "Frontend not built: run `npm run build` in app/web")
+        await super().check_config()
 
 
 def create_app(data_dir: Path | str | None = None) -> FastAPI:
@@ -62,8 +72,9 @@ def create_app(data_dir: Path | str | None = None) -> FastAPI:
         return ORJSONResponse({"detail": "Internal server error"}, status_code=500)
 
     app.include_router(router)
-    if (WEB_DIST / "index.html").is_file():
-        app.mount("/", StaticFiles(directory=WEB_DIST, html=True), name="web")
+    # Checked per request, so the UI appears as soon as app/web/dist is built,
+    # even if the API started first.
+    app.mount("/", FrontendFiles(directory=WEB_DIST, html=True, check_dir=False), name="web")
     return app
 
 

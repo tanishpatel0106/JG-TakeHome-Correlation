@@ -50,7 +50,7 @@ pip install -r requirements.txt && pip install -e .
 
 make audit        # reports/data_audit.md            (~25 s)
 make build-data   # data/processed/* artifacts        (~75-80 s on 4 cores)
-make test         # 71 tests                          (~2 s)
+make test         # 72 tests                          (~2 s)
 make bench        # reports/bench.md                  (~10 s)
 
 make api          # API on http://localhost:8000      (docs: /docs)
@@ -257,7 +257,7 @@ Profiling showed that histogram binning (not the GEMM) dominated the aggregates 
 ## 8. Testing
 
 ```bash
-make test                      # or: python -m pytest -q   -> 71 passed
+make test                      # or: python -m pytest -q   -> 72 passed
 cd app/web && npm run lint     # eslint (react-hooks rules) + tsc --noEmit
 ```
 

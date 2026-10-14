@@ -192,3 +192,18 @@ def test_unknown_route_is_json_404(client: TestClient) -> None:
     r = client.get("/api/nope")
     assert r.status_code == 404
     assert "detail" in r.json()
+
+
+def test_frontend_is_served_once_built(built_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import app.api.main as main_module
+
+    dist = tmp_path / "dist"
+    monkeypatch.setattr(main_module, "WEB_DIST", dist)
+    with TestClient(create_app(built_dir)) as c:
+        r = c.get("/")
+        assert r.status_code == 404 and "npm run build" in r.json()["detail"]
+        dist.mkdir()
+        (dist / "index.html").write_text("<!doctype html><title>ok</title>")
+        r = c.get("/")
+        assert r.status_code == 200 and "ok" in r.text
+        assert c.get("/api/health").status_code == 200
