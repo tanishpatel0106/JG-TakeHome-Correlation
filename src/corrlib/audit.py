@@ -325,7 +325,7 @@ def build_report(zip_path: Path, panel: Panel, window: int = WINDOW) -> str:
         if consistent:
             add(
                 "The per-date distribution of pairwise correlations is **consistent with the null benchmark of "
-                "independent series**: these summary statistics show no detectable common factor at this window length."
+                "independent series**: at this window length these summary statistics do not reveal a common factor (absence of evidence, not evidence that none exists)."
             )
         else:
             add(

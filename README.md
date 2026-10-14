@@ -24,12 +24,12 @@ pip install -r requirements.txt && pip install -e .
 | Goal | Command | Notes |
 |---|---|---|
 | **Demo, no private data needed** | `make demo` | Generates a deterministic synthetic dataset, builds it, builds the UI and serves everything on http://localhost:8000. |
-| Demo update events | `make demo-update` | Publishes two new snapshots: one appends the next business day, the other corrects a historical price. The running app picks them up within ~2 s. |
-| Real dataset | put the zip at `data/raw/stock_data.zip`, then `make audit build-data api` | Audit ≈ 25 s, build ≈ 70 s on 4 cores. |
+| Demo update events | `make demo-update` | Publishes two new snapshots: one appends the next business day, the other corrects a historical price. The running API switches to the new snapshot within ~2 s (it polls `CURRENT`); an open browser tab keeps its version and shows a "newer version" banner within ~10 s, with a button to switch. |
+| Real dataset | `make audit build-data api` | The Makefile uses `data/raw/stock_data.zip`, or `stock_data.zip` at the repository root if that is where it is (override with `ZIP=path`). Audit ≈ 20 s, build ≈ 65 s on 4 cores. |
 | Add or correct days | `make ingest FILES="path/20240909.csv" REASON="..."` | Creates a new snapshot; only the affected windows are recomputed. |
 | Inspect or roll back versions | `make snapshots ARGS="list"`, `ARGS="rollback v0001-…"` | `verify`, `prune --keep N` and `unlock` are also available. |
 | Frontend dev server | `make web` | http://localhost:5173, proxying `/api` to `:8000`. |
-| Tests | `make test` and `cd app/web && npm run lint && npm run build` | One command each. |
+| Tests | `make test`, then `cd app/web && npm run lint && npm run test && npm run build` | Python suite; frontend lint, unit tests, production build. |
 | Benchmarks | `make bench` | Writes `reports/bench.md`. |
 
 Without `make` (for example on Windows), run the same Python modules directly:
@@ -122,9 +122,10 @@ The same `corr.window_status` function drives every view: pair series, row, matr
 
 Raw prices are never destroyed: `prices.parquet` keeps `price_raw` next to the `price` actually used. Ambiguous cases can be settled with an auditable overrides file (`--overrides`), which marks them `confirmed`.
 
-**Retrospective view.** The rule uses the next day's prices, so the published history is a *retrospectively cleaned* view, not a point-in-time one.
-- Both the API (`view: "retrospective"`) and the UI say so.
-- A uniform **last** date cannot be judged yet. It stays `unresolved` and excluded until the next day arrives. The new snapshot then records the change in `changes.anomaly_changes`; nothing is silently rewritten.
+**Retrospective view (look-ahead).** Classifying an interior uniform-price day d compares day d+1's prices with d and with d−1, so the decision for d uses an observation that did not exist on day d. The published history is therefore a *retrospectively cleaned* view, not a point-in-time one:
+- What changes: whether the return into d is undefined (re-base) or the prices on d are excluded (placeholder). That decides which window-end dates d … d+20 have valid correlations. Correlations for windows that do not contain d are never affected.
+- Point-in-time behaviour: a snapshot whose **last** date is uniform cannot classify it. That date stays `unresolved`, its prices are excluded and its raw values kept. When the next day is ingested, the new snapshot classifies it, recomputes the affected windows and records the change in `changes.anomaly_changes`. The earlier snapshot is not rewritten and stays readable (`?snapshot=`).
+- The API reports `view: "retrospective"`, and each anomaly record carries `look_ahead: true/false` and the observation dates used. The UI's "About these statistics" dialog says the same.
 
 **Deterministic ranking.** Top-k is ordered by (ρ descending, column index ascending), and bottom-k by (ρ ascending, index ascending). It is stable even with thousands of exact ties.
 
@@ -140,7 +141,7 @@ Raw prices are never destroyed: `prices.parquet` keeps `price_raw` next to the `
 - **Uniform-price days:**
   - **Re-bases at 20.0** (2020-01-01, 2020-12-31, 2021-12-31, 2023-01-02, 2024-01-01). Prices continue from 20.0, so only the return *into* each day is undefined.
   - **One placeholder at 1.0** (2021-02-22). Prices continue from the previous day, so that day's prices are excluded.
-  - All six are `inferred`; the four interior ones used look-ahead.
+  - All six are `inferred` (no overrides). The five interior ones (every date except 2020-01-01) were classified using the next day's prices, so `look_ahead: true`. The first date, 2020-01-01, needed no look-ahead.
   - Without this handling, returns reach 747× and 19,101 exceed 50%. With it, the largest is 44%.
 - **Validity:** the first valid window is 2020-01-29. 101 later dates have no valid window, because their window spans a re-base or the placeholder.
 
@@ -149,12 +150,12 @@ Raw prices are never destroyed: `prices.parquet` keeps `price_raw` next to the `
 | | |
 |---|---|
 | **Observation** | Per-date mean pairwise ρ stays within ±0.0002, and the per-date std of ρ is 0.229. Over the full sample, pairwise ρ has std 0.0335 and max \|ρ\| 0.177. |
-| **Inference** | These figures are *consistent with the null benchmark of independent series* (std ≈ 1/√(W−1) = 0.229 for W = 20). The cross-section shows no detectable common factor. |
+| **Inference** | These figures are *consistent with an independent-series null model* (std ≈ 1/√(W−1) = 0.229 for W = 20). At this window length these summaries do not reveal a common factor; that is absence of evidence, not evidence that none exists. |
 | **Limitations** | This does **not** prove the stocks are independent, nor that every correlation is noise. Weak factors or nonlinear dependence would not show up in these summaries. |
 
 **Short-window uncertainty and multiple comparisons.**
 - With 20 returns, the sampling std of r near 0 is about 0.23. A 95% Fisher-z interval around r = 0.5 is roughly [0.07, 0.77].
-- A stock's top neighbour among 4,999 candidates will show |ρ| ≈ 0.7 even when nothing is related.
+- Under the independent-series null, the largest |ρ| among 4,999 candidates is typically about 0.75 (audit §8). A top neighbour that extreme is therefore not, on its own, evidence of a stable relationship; neither is it proof that the relationship is noise.
 - The UI therefore shows confidence bands and a null-benchmark guide, and labels top/bottom neighbours as sample correlations, not stable relationships.
 
 ---
@@ -207,8 +208,11 @@ python -m corrlib.snapshots --root data/processed list | verify | rollback ID | 
 - `ingest_log.jsonl` records every attempt with its status (`published` / `duplicate` / `rejected` / `failed`) and reason, so a failed update can simply be re-run.
 
 **Readers.** The API resolves one snapshot per request and serves it from that snapshot's own immutable files, so a response never mixes versions. While a new snapshot is being built, requests keep being served by the current one. The UI puts the snapshot id in every query key:
-- by default it follows the latest version and offers to switch when a new one is published;
-- a pinned version keeps being served for as long as it exists on disk.
+- a browser tab stays on the version it loaded, so every panel shows the same snapshot;
+- it polls `/api/snapshots/current` every 10 s and shows a "newer version" banner with a **Switch to latest** button;
+- any version can be requested explicitly with `?snapshot=<id>`, and is served for as long as it exists on disk.
+
+**Downloads in flight.** A full-matrix download captures its snapshot when it starts, and finishes from it even if a newer snapshot is published meanwhile. At most 2 downloads run at once; a third gets 429 `too_many_downloads` with `Retry-After`. If the client disconnects, the server stops computing within a block and frees the slot. `tests/test_api_streaming.py` checks all three against a live server.
 
 ---
 
@@ -247,6 +251,12 @@ What the tests cover:
 - **Snapshots:** atomic publish, an interrupted build, rollback, prune and the lock.
 - **Ingest:** duplicate no-op, append equal to a full rebuild, and a correction that changes exactly 21 window ends.
 - **API:** error envelopes, snapshot pinning, the npz export matching the API values, and cross-endpoint agreement.
+- **Streaming, against a live uvicorn server** (`tests/test_api_streaming.py`):
+  - the overlapping-download cap (a real 429 with two downloads open);
+  - a client disconnect mid-stream for npy and npz, checking that computation stops and the slot is released;
+  - all four dtype/format exports against the API row values;
+  - a snapshot published during an active download.
+  Block production is gated by a semaphore the test controls, so there are no timing sleeps.
 - **Frontend:** the stale-result guard in the UI.
 
 ---

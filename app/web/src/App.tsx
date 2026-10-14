@@ -417,7 +417,7 @@ function Explorer({ meta, timeline, snap, mode, choice, onCycleTheme }: Explorer
           id="neighbours"
           className="area-left"
           title={view.focus ? `Neighbours of ${view.focus}` : "Neighbours"}
-          subtitle="Sample correlations on the selected date. High |ρ| among thousands of candidates is expected by chance; see the dashed guide."
+          subtitle="Sample correlations on the selected date. Even with no real relationship, the most extreme of thousands of candidates reaches a high |ρ|; see the dashed guide."
         >
           <div className="mb-2 flex items-center gap-2">
             <div className="min-w-0 flex-1">

@@ -1,4 +1,4 @@
-"""API v2: snapshot pinning, npz download, error envelope, download limit."""
+"""API v2: snapshot pinning, npz download, error envelope (download concurrency: test_api_streaming.py)."""
 
 from __future__ import annotations
 
@@ -94,15 +94,3 @@ def test_error_envelope_codes(client: TestClient, fixture_data: FixtureData) -> 
         assert r.status_code == status, path
         detail = r.json()["detail"]
         assert detail["code"] == code and isinstance(detail["message"], str), path
-
-
-def test_too_many_downloads_is_429(client: TestClient, fixture_data: FixtureData) -> None:
-    app = client.app
-    assert app.state.active_downloads == 0  # earlier downloads released their slots
-    app.state.active_downloads = 2
-    try:
-        r = client.get(f"/api/corr/{fixture_data.dates[-1].isoformat()}/download")
-    finally:
-        app.state.active_downloads = 0
-    assert r.status_code == 429 and r.headers["retry-after"]
-    assert r.json()["detail"]["code"] == "too_many_downloads"

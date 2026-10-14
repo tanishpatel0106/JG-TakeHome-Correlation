@@ -2,7 +2,8 @@
 # Windows users: the plain commands are listed in README.md ("Quickstart").
 
 PY   ?= python
-ZIP  ?= data/raw/stock_data.zip
+# Source zip: data/raw/stock_data.zip if present, else stock_data.zip at the repository root.
+ZIP  ?= $(firstword $(wildcard data/raw/stock_data.zip stock_data.zip) data/raw/stock_data.zip)
 # Store root: CURRENT + snapshots/<id>/ + overlays/ + ingest_log.jsonl (see corrlib.snapshots)
 OUT  ?= data/processed
 ROOT ?= $(OUT)
@@ -18,7 +19,7 @@ DEMO_DIR   ?= data/demo
 DEMO_STORE ?= $(DEMO_DIR)/store
 
 .PHONY: install install-py install-web audit build-data ingest snapshots api web web-build test bench all clean clean-store \
-	demo-data demo-update demo-api demo
+	demo-data demo-update demo-api demo bench-demo
 
 install: install-py install-web
 
@@ -57,8 +58,13 @@ web-build:
 test:
 	$(PY) -m pytest -q
 
+# Benchmarks the published store $(ROOT) (build it first: make build-data). Writes reports/bench.md.
 bench:
 	$(PY) scripts/bench.py --data $(ROOT) --out reports/bench.md
+
+# Self-contained: builds the synthetic demo store, benchmarks it, writes $(DEMO_DIR)/bench.md (not committed).
+bench-demo: demo-data
+	$(PY) scripts/bench.py --data $(DEMO_STORE) --out $(DEMO_DIR)/bench.md
 
 all: install audit build-data test bench web-build
 

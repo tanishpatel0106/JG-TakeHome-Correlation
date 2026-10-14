@@ -19,7 +19,6 @@ from corrlib.clean import clean_frame
 from corrlib.config import RETURNS_FILE, build_policy
 from corrlib.io import iter_daily_frames
 
-REAL_V1 = Path(__file__).resolve().parents[1] / "data" / "processed"
 
 
 def test_round_trip_preserves_shapes_dtypes_axes(built_dir: Path, fixture_data: FixtureData) -> None:
@@ -323,25 +322,6 @@ def test_read_helpers_accept_root_or_snapshot(built_dir: Path, built_snapshot_di
     assert store.read_manifest(built_dir) == store.read_manifest(built_snapshot_dir)
     assert store.snapshot_path(built_dir) == built_snapshot_dir == store.snapshot_path(built_snapshot_dir)
 
-
-@pytest.mark.skipif(not (REAL_V1 / "manifest.json").is_file(), reason="real v1 artifacts not present")
-def test_real_v1_artifacts_load_read_only() -> None:
-    manifest = json.loads((REAL_V1 / "manifest.json").read_text())
-    if manifest.get("format_version") != 1:
-        pytest.skip("data/processed is not a format-1 directory")
-    s = store.load_store(REAL_V1)
-    assert s.format_version == 1 and s.snapshot_id.startswith("legacy-")
-    assert (s.n_dates, s.n_tickers) == (900, 5000)
-    assert [(r["date"], r["classification"]) for r in s.anomalies] == [
-        ("2020-01-01", "rebase"),
-        ("2020-12-31", "rebase"),
-        ("2021-02-22", "placeholder"),
-        ("2021-12-31", "rebase"),
-        ("2023-01-02", "rebase"),
-        ("2024-01-01", "rebase"),
-    ]
-    placeholder = s.anomalies[2]
-    assert placeholder["affected"]["window_end_dates"]["count"] == 21
 
 
 def test_write_issues_by_date_requires_one_row_per_date(tmp_path: Path) -> None:

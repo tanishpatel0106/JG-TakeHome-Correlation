@@ -174,7 +174,7 @@ export function NeighborsBody({ data, window, nullMax, pair, disabled, onPair, o
       {Number.isFinite(nullMax) ? (
         <p className="text-[11.5px] text-muted">
           Dashed lines: |ρ| ≈ {nullMax.toFixed(2)}, the typical largest value among {data.n_valid - 1} independent series of{" "}
-          {window} returns. Values near or inside them are common by chance; whiskers are 95% Fisher-z intervals.
+          {window} returns under an independent-series null. Values near or inside them are common under that null; whiskers are 95% Fisher-z intervals.
         </p>
       ) : null}
     </div>
