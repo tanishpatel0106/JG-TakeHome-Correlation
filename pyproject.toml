@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "corrlib"
+version = "0.1.0"
+description = "Trailing-window stock return correlations: ingestion, storage and math."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.0",
+    "pandas>=2.2",
+    "pyarrow>=16.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Repo root on sys.path so tests can import the `app` package.
+pythonpath = ["."]
+addopts = "-ra"
+filterwarnings = ["error::DeprecationWarning:corrlib.*"]
