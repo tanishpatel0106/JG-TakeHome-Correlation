@@ -59,6 +59,7 @@ class _Model(BaseModel):
 
 class HealthResponse(_Model):
     status: str
+    snapshot_id: str
     n_tickers: int
     n_dates: int
 
@@ -78,6 +79,11 @@ class MetaResponse(_Model):
     default_ticker: str | None = Field(description="First valid ticker (alphabetically) on default_date")
     breaks: Breaks
     manifest: dict[str, Any]
+    snapshot: dict[str, Any] = Field(description="id, seq, parent, created_at, kind of the snapshot served")
+    view: str = Field(description="retrospective: every date is computed with all data of this snapshot")
+    dataset: dict[str, Any] = Field(description="kind (source|demo) and label")
+    policy: dict[str, Any] = Field(description="Validity / missing-data policy (reason codes etc.)")
+    anomalies: list[dict[str, Any]] = Field(description="Uniform-price days with evidence and classification")
 
 
 class TimelineResponse(_Model):
@@ -89,6 +95,7 @@ class TimelineResponse(_Model):
 
 class SummaryResponse(_Model):
     date: str
+    status: str = Field(description="ok, or no_valid_pairs when fewer than 2 stocks are valid")
     n_valid: int
     n_pairs: int
     mean: float | None
@@ -106,6 +113,7 @@ class StockResponse(_Model):
     date: str
     ticker: str
     valid: bool = Field(description="False when the stock has missing or constant returns in the window")
+    reason: str = Field(description="valid | insufficient_history | missing_returns | constant_returns")
     n_valid: int
     k: int
     top: list[Neighbor]
@@ -116,6 +124,7 @@ class MatrixResponse(_Model):
     date: str
     tickers: list[str]
     valid: list[bool]
+    reasons: list[str] = Field(description="Validity reason per requested ticker")
     matrix: list[list[float | None]]
 
 
@@ -130,8 +139,11 @@ class PairResponse(_Model):
 class RowResponse(_Model):
     date: str
     ticker: str
+    valid: bool
+    reason: str
+    n_valid: int
     corr: list[float | None] = Field(description="Aligned with meta.tickers")
 
 
 class ErrorResponse(_Model):
-    detail: Any = Field(description="A message string, or an object with `message` and context")
+    detail: dict[str, Any] = Field(description="`code` (machine-readable), `message`, plus context fields")

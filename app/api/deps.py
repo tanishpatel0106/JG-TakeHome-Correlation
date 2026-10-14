@@ -8,35 +8,58 @@ import re
 from datetime import date
 from typing import Annotated
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, HTTPException, Query, Request
 
 from corrlib.config import MAX_SUGGESTIONS
 from corrlib.store import Store
 
+from .registry import SnapshotNotFound, SnapshotRegistry
+
 _ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
-def get_store(request: Request) -> Store:
-    """The store loaded once by the app's lifespan handler."""
-    return request.app.state.store
+def get_registry(request: Request) -> SnapshotRegistry:
+    """The snapshot registry created by the app's lifespan handler."""
+    return request.app.state.registry
+
+
+def get_store(
+    request: Request,
+    snapshot: str | None = Query(None, description="Pin a snapshot id (default: the current one)"),
+) -> Store:
+    """The one Store this request reads (resolved exactly once; also sets ``X-Snapshot-Id``)."""
+    try:
+        store = get_registry(request).get(snapshot)
+    except SnapshotNotFound as exc:
+        raise api_error(
+            404,
+            "snapshot_not_found",
+            f"Unknown snapshot {exc.snapshot_id!r}",
+            snapshot=exc.snapshot_id,
+            available=exc.available,
+        ) from None
+    request.state.snapshot_id = store.snapshot_id
+    return store
 
 
 StoreDep = Annotated[Store, Depends(get_store)]
 
 
-def api_error(status: int, message: str, **context: object) -> HTTPException:
-    """HTTPException whose JSON body is ``{"detail": {"message": ..., **context}}``."""
-    return HTTPException(status_code=status, detail={"message": message, **context})
+def api_error(
+    status: int, code: str, message: str, headers: dict[str, str] | None = None, **context: object
+) -> HTTPException:
+    """HTTPException whose JSON body is ``{"detail": {"code": ..., "message": ..., **context}}``."""
+    return HTTPException(status_code=status, detail={"code": code, "message": message, **context}, headers=headers)
 
 
 def check_iso_date(value: str, field: str = "date") -> str:
     """Validate ``YYYY-MM-DD`` (a real calendar date). 422 otherwise."""
     if not _ISO_DATE.match(value):
-        raise api_error(422, f"Invalid {field} {value!r}: expected YYYY-MM-DD", **{field: value})
+        raise api_error(422, "invalid_date", f"Invalid {field} {value!r}: expected YYYY-MM-DD", **{field: value})
     try:
         date.fromisoformat(value)
     except ValueError:
-        raise api_error(422, f"Invalid {field} {value!r}: not a calendar date", **{field: value}) from None
+        raise api_error(422, "invalid_date", f"Invalid {field} {value!r}: not a calendar date", **{field: value}) from None
     return value
 
 
@@ -51,7 +74,7 @@ def resolve_date(store: Store, value: str) -> int:
             nearest.append(store.dates[pos - 1])
         if pos < store.n_dates:
             nearest.append(store.dates[pos])
-        raise api_error(404, f"{value} is not a trading date in the data", date=value, nearest=nearest)
+        raise api_error(404, "date_not_traded", f"{value} is not a trading date in the data", date=value, nearest=nearest)
     return t
 
 
@@ -61,6 +84,7 @@ def require_window(store: Store, t: int) -> None:
         first = store.dates[store.first_valid_index] if store.first_valid_index >= 0 else None
         raise api_error(
             422,
+            "date_before_first_window",
             f"{store.dates[t]} is before the first date with a full {store.window}-return window",
             date=store.dates[t],
             first_valid_date=first,
@@ -95,11 +119,26 @@ def suggest_tickers(store: Store, query: str) -> list[str]:
 
 
 def resolve_ticker(store: Store, value: str) -> int:
-    """Column index of a ticker (case-insensitive). 404 with suggestions if unknown."""
+    """Column index of a ticker (case-insensitive).
+
+    404 ``unknown_ticker`` with suggestions if unknown; 409 ``ambiguous_ticker``
+    if several tickers differ only by case and none matches exactly.
+    """
+    exact = store.ticker_index.get(value.strip())
+    if exact is not None:
+        return exact
     key = value.strip().upper()
     j = store.ticker_index.get(key)
-    if j is None:
-        raise api_error(
-            404, f"Unknown ticker {value!r}", ticker=value, suggestions=suggest_tickers(store, key)
-        )
-    return j
+    if j is not None:
+        return j
+    candidates = []
+    for k in range(store.n_tickers):
+        if store.tickers[k].upper() == key:
+            candidates.append(store.tickers[k])
+    if len(candidates) == 1:
+        return store.ticker_index[candidates[0]]
+    if candidates:
+        raise api_error(409, "ambiguous_ticker", f"Ticker {value!r} is ambiguous", ticker=value, candidates=candidates)
+    raise api_error(
+        404, "unknown_ticker", f"Unknown ticker {value!r}", ticker=value, suggestions=suggest_tickers(store, key)
+    )

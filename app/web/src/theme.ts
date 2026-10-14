@@ -19,38 +19,46 @@ export interface ChartTheme {
   missingHatch: string;
   positive: string;
   negative: string;
+  /** Anomaly / warning markers. */
+  warn: string;
+  /** Confidence-band fill. */
+  band: string;
 }
 
 const LIGHT: ChartTheme = {
-  surface: "#fcfcfb",
-  ink: "#0b0b0b",
-  inkSecondary: "#52514e",
-  muted: "#898781",
-  grid: "#e1e0d9",
-  axis: "#c3c2b7",
-  accent: "#2a78d6",
-  accentWash: "rgba(42, 120, 214, 0.12)",
-  diverging: ["#0d366b", "#3987e5", "#b7d3f6", "#f0efec", "#f8cdcb", "#e34948", "#7a1616"],
-  missing: "#b9b8b0",
-  missingHatch: "rgba(11, 11, 11, 0.28)",
-  positive: "#e34948",
-  negative: "#2a78d6",
+  surface: "#ffffff",
+  ink: "#0a0a0c",
+  inkSecondary: "#3c3c44",
+  muted: "#64646e",
+  grid: "#ececf0",
+  axis: "#d4d4dc",
+  accent: "#5b4fe0",
+  accentWash: "rgba(91, 79, 224, 0.12)",
+  diverging: ["#0d366b", "#2468c9", "#b7d3f6", "#f0f0f3", "#f8cdcb", "#d23c3b", "#7a1616"],
+  missing: "#c4c4cc",
+  missingHatch: "rgba(10, 10, 12, 0.28)",
+  positive: "#d23c3b",
+  negative: "#2468c9",
+  warn: "#b26a00",
+  band: "rgba(91, 79, 224, 0.14)",
 };
 
 const DARK: ChartTheme = {
-  surface: "#1a1a19",
-  ink: "#f0efec",
-  inkSecondary: "#c3c2b7",
-  muted: "#898781",
-  grid: "#2c2c2a",
-  axis: "#383835",
-  accent: "#3987e5",
-  accentWash: "rgba(57, 135, 229, 0.16)",
-  diverging: ["#9ec5f4", "#3987e5", "#1f4d86", "#383835", "#7e2f2e", "#e66767", "#f4aaa8"],
-  missing: "#5d5d58",
-  missingHatch: "rgba(240, 239, 236, 0.30)",
-  positive: "#e66767",
-  negative: "#3987e5",
+  surface: "#111114",
+  ink: "#f4f4f5",
+  inkSecondary: "#c4c4cc",
+  muted: "#9a9aa5",
+  grid: "#1f1f24",
+  axis: "#2e2e35",
+  accent: "#8b8cf8",
+  accentWash: "rgba(139, 140, 248, 0.16)",
+  diverging: ["#a8ccf7", "#4f8fe6", "#1f3f6e", "#2a2a30", "#6e2a2a", "#e66767", "#f6b3b1"],
+  missing: "#4a4a52",
+  missingHatch: "rgba(244, 244, 245, 0.30)",
+  positive: "#f07272",
+  negative: "#5b9cf0",
+  warn: "#f5b84d",
+  band: "rgba(139, 140, 248, 0.20)",
 };
 
 export function chartTheme(mode: ColorMode): ChartTheme {
@@ -62,13 +70,14 @@ export function baseOption(t: ChartTheme) {
   return {
     backgroundColor: "transparent",
     animation: false,
-    textStyle: { fontFamily: 'system-ui, -apple-system, "Segoe UI", sans-serif', color: t.inkSecondary },
+    textStyle: { fontFamily: 'Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif', color: t.inkSecondary },
     tooltip: {
       backgroundColor: t.surface,
       borderColor: t.axis,
       borderWidth: 1,
+      padding: [8, 12],
       textStyle: { color: t.ink, fontSize: 12 },
-      extraCssText: "box-shadow: 0 4px 16px rgba(0,0,0,0.12); border-radius: 6px;",
+      extraCssText: "box-shadow: 0 12px 32px rgba(0,0,0,0.28); border-radius: 12px;",
     },
   };
 }

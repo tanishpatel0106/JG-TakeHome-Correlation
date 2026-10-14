@@ -4,25 +4,27 @@ returns; nothing here ever holds an N x N matrix."""
 from __future__ import annotations
 
 import bisect
-import io
-from collections.abc import Iterator
+from typing import Any, Literal
 
 import numpy as np
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import StreamingResponse
 
+from corrlib import snapshots
 from corrlib.config import (
     DEFAULT_K,
-    DOWNLOAD_BLOCK_ROWS,
     MATRIX_MAX_TICKERS,
     MATRIX_MIN_TICKERS,
     MAX_K,
+    REASON_NAMES,
 )
-from corrlib.corr import iter_full_blocks, one_vs_all, pair_series, prepare_window, subset_matrix, top_bottom_k
+from corrlib.corr import one_vs_all, pair_series, subset_matrix, top_bottom_k, window_status
 from corrlib.store import Store
 
+from . import download as dl
 from .deps import (
     StoreDep,
+    get_registry,
     api_error,
     check_iso_date,
     require_window,
@@ -50,9 +52,16 @@ from .schemas import (
 router = APIRouter(prefix="/api")
 
 _ERRORS = {
-    404: {"model": ErrorResponse, "description": "Unknown date or ticker"},
+    404: {"model": ErrorResponse, "description": "Unknown date, ticker or snapshot"},
     422: {"model": ErrorResponse, "description": "Invalid input, or date before the first valid window"},
 }
+
+
+def _reason_names(codes: np.ndarray) -> list[str]:
+    out = []
+    for k in range(len(codes)):
+        out.append(REASON_NAMES[int(codes[k])])
+    return out
 
 
 def build_meta(store: Store) -> MetaResponse:
@@ -63,7 +72,7 @@ def build_meta(store: Store) -> MetaResponse:
         default_index = int(usable[-1])
     default_ticker = None
     if default_index >= 0:
-        _, valid = prepare_window(store.returns, default_index, store.window)
+        _, valid, _ = window_status(store.returns, default_index, store.window)
         default_ticker = store.tickers[int(np.flatnonzero(valid)[0])]
     structural = store.manifest.get("structural", {})
     return MetaResponse(
@@ -79,17 +88,54 @@ def build_meta(store: Store) -> MetaResponse:
             placeholder_dates=structural.get("placeholder_dates", []),
         ),
         manifest=store.manifest,
+        snapshot=store.snapshot,
+        view=store.view,
+        dataset=store.dataset,
+        policy=store.policy,
+        anomalies=store.anomalies,
     )
 
 
 @router.get("/health", response_model=HealthResponse)
 def health(store: StoreDep) -> HealthResponse:
-    return HealthResponse(status="ok", n_tickers=store.n_tickers, n_dates=store.n_dates)
+    return HealthResponse(status="ok", snapshot_id=store.snapshot_id, n_tickers=store.n_tickers, n_dates=store.n_dates)
 
 
-@router.get("/meta", response_model=MetaResponse)
-def meta(request: Request) -> MetaResponse:
-    return request.app.state.meta
+@router.get("/snapshots")
+def list_snapshots(request: Request) -> dict[str, Any]:
+    """Every published snapshot (seq order) and which one is current."""
+    registry = get_registry(request)
+    request.state.snapshot_id = registry.current_id
+    return {"current": registry.current_id, "snapshots": registry.describe_all()}
+
+
+@router.get("/snapshots/current")
+def current_snapshot(request: Request) -> dict[str, Any]:
+    """The current snapshot (cheap; the UI polls it)."""
+    store = get_registry(request).get(None)
+    request.state.snapshot_id = store.snapshot_id
+    return {
+        "id": store.snapshot_id,
+        "seq": store.snapshot.get("seq"),
+        "created_at": store.snapshot.get("created_at"),
+        "data_as_of": store.dates[-1] if store.dates else None,
+    }
+
+
+@router.post("/snapshots/reload")
+def reload_snapshots(request: Request) -> dict[str, Any]:
+    """Re-read CURRENT now (the background watcher does this every CORR_RELOAD_SECONDS)."""
+    try:
+        previous, current = get_registry(request).reload()
+    except snapshots.SnapshotError as exc:
+        raise api_error(500, "internal_error", f"Cannot reload: {exc}") from None
+    request.state.snapshot_id = current
+    return {"previous": previous, "current": current, "changed": previous != current}
+
+
+@router.get("/meta", response_model=MetaResponse, responses=_ERRORS)
+def meta(request: Request, store: StoreDep) -> MetaResponse:
+    return get_registry(request).meta(store, build_meta)
 
 
 @router.get("/stats/timeline", response_model=TimelineResponse)
@@ -109,6 +155,7 @@ def date_summary(date: str, store: StoreDep) -> SummaryResponse:
     n_valid = int(store.n_valid[t])
     return SummaryResponse(
         date=store.dates[t],
+        status="ok" if n_valid >= 2 else "no_valid_pairs",
         n_valid=n_valid,
         n_pairs=n_valid * (n_valid - 1) // 2,
         mean=finite_or_none(store.mean_corr[t]),
@@ -134,7 +181,7 @@ def pair(
     if end is not None:
         hi = bisect.bisect_right(store.dates, check_iso_date(end, "end"))
     if start is not None and end is not None and start > end:
-        raise api_error(422, "start must not be after end", start=start, end=end)
+        raise api_error(422, "invalid_input", "start must not be after end", start=start, end=end)
     series = pair_series(store.returns, i, j, store.window)
     return PairResponse(
         a=store.tickers[i],
@@ -155,13 +202,14 @@ def stock_neighbors(
     t = resolve_date(store, date)
     require_window(store, t)
     i = resolve_ticker(store, ticker)
-    Z, valid = prepare_window(store.returns, t, store.window)
+    Z, valid, reason = window_status(store.returns, t, store.window)
     row = one_vs_all(Z, valid, i)
     top, bottom = top_bottom_k(row, k, exclude=i)
     return StockResponse(
         date=store.dates[t],
         ticker=store.tickers[i],
         valid=bool(valid[i]),
+        reason=REASON_NAMES[int(reason[i])],
         n_valid=int(valid.sum()),
         k=k,
         top=_neighbors(store, row, top),
@@ -188,6 +236,7 @@ def matrix(
     if not MATRIX_MIN_TICKERS <= len(requested) <= MATRIX_MAX_TICKERS:
         raise api_error(
             422,
+            "invalid_input",
             f"Need between {MATRIX_MIN_TICKERS} and {MATRIX_MAX_TICKERS} unique tickers, got {len(requested)}",
             count=len(requested),
         )
@@ -200,13 +249,14 @@ def matrix(
         else:
             idx[k] = j
     if unknown:
-        raise api_error(404, f"Unknown tickers: {', '.join(unknown)}", unknown=unknown)
-    Z, valid = prepare_window(store.returns, t, store.window)
+        raise api_error(404, "unknown_tickers", f"Unknown tickers: {', '.join(unknown)}", unknown=unknown)
+    Z, valid, reason = window_status(store.returns, t, store.window)
     C = subset_matrix(Z, valid, idx)
     return MatrixResponse(
         date=store.dates[t],
         tickers=requested,
         valid=valid[idx].tolist(),
+        reasons=_reason_names(reason[idx]),
         matrix=matrix_or_none(C),
     )
 
@@ -229,8 +279,47 @@ def row(date: str, ticker: str, store: StoreDep) -> RowResponse:
     t = resolve_date(store, date)
     require_window(store, t)
     i = resolve_ticker(store, ticker)
-    Z, valid = prepare_window(store.returns, t, store.window)
-    return RowResponse(date=store.dates[t], ticker=store.tickers[i], corr=floats_or_none(one_vs_all(Z, valid, i)))
+    Z, valid, reason = window_status(store.returns, t, store.window)
+    return RowResponse(
+        date=store.dates[t],
+        ticker=store.tickers[i],
+        valid=bool(valid[i]),
+        reason=REASON_NAMES[int(reason[i])],
+        n_valid=int(valid.sum()),
+        corr=floats_or_none(one_vs_all(Z, valid, i)),
+    )
+
+
+DtypeQuery = Query("float32", description="float32 (abs error <= 1e-6) or float16 (abs error <= 1e-3)")
+FormatQuery = Query("npz", alias="format", description="npz (corr + tickers + meta) or npy (matrix only)")
+
+
+@router.get("/corr/{date}/download/info", responses=_ERRORS)
+def download_info(
+    date: str,
+    store: StoreDep,
+    dtype: Literal["float32", "float16"] = DtypeQuery,
+    fmt: Literal["npz", "npy"] = FormatQuery,
+) -> dict[str, Any]:
+    """Size, filename and metadata of a download, without computing it."""
+    t = resolve_date(store, date)
+    require_window(store, t)
+    plan = dl.plan_download(store, t, dtype, fmt)
+    return {
+        "date": store.dates[t],
+        "window": store.window,
+        "snapshot_id": store.snapshot_id,
+        "dtype": dtype,
+        "format": fmt,
+        "shape": [store.n_tickers, store.n_tickers],
+        "bytes": plan.size,
+        "bytes_exact": plan.size_exact,
+        "filename": plan.filename,
+        "ticker_order": plan.meta["ticker_order"],
+        "invalid_semantics": plan.meta["invalid_semantics"],
+        "diagonal_semantics": plan.meta["diagonal_semantics"],
+        "tolerance": plan.meta["tolerance"],
+    }
 
 
 @router.get(
@@ -238,36 +327,22 @@ def row(date: str, ticker: str, store: StoreDep) -> RowResponse:
     response_class=StreamingResponse,
     responses={
         200: {
-            "content": {"application/octet-stream": {}},
-            "description": "float16 [N x N] .npy; row/column order is meta.tickers; NaN for invalid stocks",
+            "content": {"application/zip": {}, "application/octet-stream": {}},
+            "description": "[N x N] matrix in meta.tickers order (npz: corr.npy + tickers.npy + meta.npy); "
+            "NaN for invalid stocks",
         },
+        429: {"model": ErrorResponse, "description": "Too many concurrent downloads"},
         **_ERRORS,
     },
 )
-def download(date: str, store: StoreDep) -> StreamingResponse:
+async def download(
+    date: str,
+    request: Request,
+    store: StoreDep,
+    dtype: Literal["float32", "float16"] = DtypeQuery,
+    fmt: Literal["npz", "npy"] = FormatQuery,
+) -> StreamingResponse:
     t = resolve_date(store, date)
     require_window(store, t)
-    Z, valid = prepare_window(store.returns, t, store.window)
-    n = store.n_tickers
-    header = io.BytesIO()
-    np.lib.format.write_array_header_1_0(
-        header, {"descr": np.lib.format.dtype_to_descr(np.dtype("<f2")), "fortran_order": False, "shape": (n, n)}
-    )
-    head = header.getvalue()
-    filename = f"corr_{store.dates[t]}_w{store.window}.npy"
-    return StreamingResponse(
-        _npy_body(head, Z, valid),
-        media_type="application/octet-stream",
-        headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
-            "Content-Length": str(len(head) + n * n * 2),
-            "X-Row-Order": "meta.tickers",
-        },
-    )
-
-
-def _npy_body(head: bytes, Z: np.ndarray, valid: np.ndarray) -> Iterator[bytes]:
-    """Header, then the matrix row block by row block (O(block * N) memory)."""
-    yield head
-    for _, rows in iter_full_blocks(Z, valid, block=DOWNLOAD_BLOCK_ROWS):
-        yield rows.astype("<f2").tobytes()
+    plan = dl.plan_download(store, t, dtype, fmt)
+    return dl.start_download(request, store, t, plan)

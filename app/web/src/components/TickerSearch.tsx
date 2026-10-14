@@ -10,6 +10,8 @@ interface TickerSearchProps {
   disabled?: boolean;
   /** Tickers to leave out of the list (e.g. already in the basket). */
   exclude?: string[];
+  /** Fixed id for the input (lets the "/" shortcut focus it). */
+  inputId?: string;
 }
 
 /** Exact match first, then prefix matches, then substring matches; at most 50. */
@@ -31,8 +33,9 @@ export function filterTickers(tickers: string[], query: string, exclude: string[
 }
 
 /** Accessible combobox (ARIA 1.2 pattern): type to filter, arrows to move, Enter to pick, Esc to close. */
-export function TickerSearch({ tickers, onSelect, label, placeholder, disabled, exclude }: TickerSearchProps) {
-  const id = useId();
+export function TickerSearch({ tickers, onSelect, label, placeholder, disabled, exclude, inputId }: TickerSearchProps) {
+  const generated = useId();
+  const id = inputId ?? generated;
   const listId = `${id}-list`;
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);

@@ -5,6 +5,33 @@ export interface Breaks {
   placeholder_dates: string[];
 }
 
+export interface SnapshotInfo {
+  id: string;
+  seq?: number;
+  parent?: string | null;
+  created_at?: string;
+  kind?: string;
+  data_as_of?: string;
+}
+
+export interface DatasetInfo {
+  kind?: string; // "demo" | "real" | ...
+  label?: string;
+}
+
+/** One detected uniform-price day (corrlib anomalies.json); every field optional for older APIs. */
+export interface Anomaly {
+  date: string;
+  classification?: string;
+  status?: string;
+  look_ahead?: boolean;
+  action?: string;
+  rule?: string;
+  evidence?: { note?: string; median_abs_log_from_uniform?: number; median_abs_log_from_previous?: number };
+  override?: { classification?: string; reason?: string; author?: string } | null;
+  affected?: { window_end_dates?: { first?: string; last?: string; count?: number } };
+}
+
 export interface Meta {
   window: number;
   tickers: string[];
@@ -15,7 +42,32 @@ export interface Meta {
   default_ticker: string | null;
   breaks: Breaks;
   manifest: Record<string, unknown>;
+  // v2 additions (optional: older APIs omit them)
+  snapshot?: SnapshotInfo;
+  dataset?: DatasetInfo;
+  view?: string;
+  policy?: Record<string, unknown>;
+  anomalies?: Anomaly[];
 }
+
+export interface DownloadInfo {
+  date: string;
+  window: number;
+  snapshot_id?: string;
+  dtype: string;
+  format: string;
+  shape: number[];
+  bytes: number;
+  bytes_exact?: boolean;
+  bytes_estimated?: boolean;
+  filename?: string;
+  ticker_order?: string;
+  invalid_semantics?: string;
+  tolerance?: number;
+}
+
+export type DownloadDtype = "float32" | "float16";
+export type DownloadFormat = "npz" | "npy";
 
 export interface Timeline {
   dates: string[];
@@ -68,12 +120,16 @@ export interface PairSeries {
 export class ApiError extends Error {
   readonly status: number;
   readonly detail: unknown;
+  /** Machine-readable `detail.code` (e.g. "date_not_traded"), or a client-side code. */
+  readonly code: string;
 
   constructor(status: number, message: string, detail: unknown) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.detail = detail;
+    const code = detail && typeof detail === "object" && !Array.isArray(detail) ? (detail as { code?: unknown }).code : undefined;
+    this.code = typeof code === "string" ? code : status === 0 ? "network_error" : `http_${status}`;
   }
 }
 
@@ -106,7 +162,7 @@ async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
     response = await fetch(path, { signal, headers: { Accept: "application/json" } });
   } catch (err) {
     if ((err as Error).name === "AbortError") throw err;
-    throw new ApiError(0, "Cannot reach the API. Is it running on port 8000?", null);
+    throw new ApiError(0, "Cannot reach the API. Is the server running?", null);
   }
   if (!response.ok) {
     let detail: unknown = null;
@@ -122,15 +178,44 @@ async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
 
 const enc = encodeURIComponent;
 
+/** Append query parameters, skipping null/undefined (so `snapshot` is only sent when known). */
+export function withQuery(path: string, params: Record<string, string | number | null | undefined>): string {
+  const parts: string[] = [];
+  for (const [key, value] of Object.entries(params)) {
+    if (value === null || value === undefined || value === "") continue;
+    parts.push(`${key}=${enc(String(value))}`);
+  }
+  if (parts.length === 0) return path;
+  return `${path}${path.includes("?") ? "&" : "?"}${parts.join("&")}`;
+}
+
+/** The snapshot a Meta response describes (v2 `meta.snapshot`, else the manifest's record). */
+export function metaSnapshot(meta: Meta): SnapshotInfo | null {
+  if (meta.snapshot?.id) return meta.snapshot;
+  const fromManifest = meta.manifest?.snapshot as SnapshotInfo | undefined;
+  return fromManifest?.id ? fromManifest : null;
+}
+
+export function metaDataset(meta: Meta): DatasetInfo | null {
+  return meta.dataset ?? (meta.manifest?.dataset as DatasetInfo | undefined) ?? null;
+}
+
+type Snap = string | null | undefined;
+
 export const api = {
   meta: (signal?: AbortSignal) => getJson<Meta>("/api/meta", signal),
-  timeline: (signal?: AbortSignal) => getJson<Timeline>("/api/stats/timeline", signal),
-  summary: (date: string, signal?: AbortSignal) => getJson<Summary>(`/api/dates/${enc(date)}/summary`, signal),
-  neighbors: (date: string, ticker: string, k: number, signal?: AbortSignal) =>
-    getJson<StockNeighbors>(`/api/corr/${enc(date)}/stock/${enc(ticker)}?k=${k}`, signal),
-  matrix: (date: string, tickers: string[], signal?: AbortSignal) =>
-    getJson<MatrixResult>(`/api/corr/${enc(date)}/matrix?tickers=${enc(tickers.join(","))}`, signal),
-  pair: (a: string, b: string, signal?: AbortSignal) =>
-    getJson<PairSeries>(`/api/corr/pair?a=${enc(a)}&b=${enc(b)}`, signal),
-  downloadUrl: (date: string) => `/api/corr/${enc(date)}/download`,
+  current: (signal?: AbortSignal) => getJson<SnapshotInfo>("/api/snapshots/current", signal),
+  timeline: (snapshot: Snap, signal?: AbortSignal) => getJson<Timeline>(withQuery("/api/stats/timeline", { snapshot }), signal),
+  summary: (date: string, snapshot: Snap, signal?: AbortSignal) =>
+    getJson<Summary>(withQuery(`/api/dates/${enc(date)}/summary`, { snapshot }), signal),
+  neighbors: (date: string, ticker: string, k: number, snapshot: Snap, signal?: AbortSignal) =>
+    getJson<StockNeighbors>(withQuery(`/api/corr/${enc(date)}/stock/${enc(ticker)}`, { k, snapshot }), signal),
+  matrix: (date: string, tickers: string[], snapshot: Snap, signal?: AbortSignal) =>
+    getJson<MatrixResult>(withQuery(`/api/corr/${enc(date)}/matrix`, { tickers: tickers.join(","), snapshot }), signal),
+  pair: (a: string, b: string, snapshot: Snap, signal?: AbortSignal) =>
+    getJson<PairSeries>(withQuery("/api/corr/pair", { a, b, snapshot }), signal),
+  downloadInfo: (date: string, dtype: DownloadDtype, format: DownloadFormat, snapshot: Snap, signal?: AbortSignal) =>
+    getJson<DownloadInfo>(withQuery(`/api/corr/${enc(date)}/download/info`, { dtype, format, snapshot }), signal),
+  downloadUrl: (date: string, dtype: DownloadDtype, format: DownloadFormat, snapshot: Snap) =>
+    withQuery(`/api/corr/${enc(date)}/download`, { dtype, format, snapshot }),
 };

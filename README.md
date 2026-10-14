@@ -1,341 +1,278 @@
 # Stock Correlation Explorer
 
-## 1. Overview
+**What it is:** a database-free system for exploring **trailing 20-day return correlations** across ~5,000 stocks by date.
+- It reads daily price CSVs straight from a `.zip`, cleans them, and stores only O(T·N) data: 18 MB of returns plus small aggregates.
+- It computes any correlation on demand, from a single pair up to the full 5,000 × 5,000 matrix.
+- A FastAPI backend serves a React app. Every published dataset version is immutable, so new dates and price corrections arrive as new snapshots without disturbing readers.
 
-Trailing 20-day return correlations across 5,000 stocks. The pipeline reads the daily CSVs straight from a zip, stores 18 MB of derived data on disk, and computes any correlation on demand. A FastAPI backend serves it to a React app for exploring by date.
+![Explorer on the synthetic demo data](reports/screenshot.png)
 
-![Stock Correlation Explorer: timeline, neighbours, heatmap, distribution and pair chart](reports/screenshot.png)
-
-*Screenshot of the real data, last date (6 Sep 2024), focus stock `NA` (a real ticker). Dark mode and a one-column layout below 900px are also supported.*
-
-**What you can do in the app:**
-- pick any trading date that has a valid window (◀ ▶, a date input, or a click on the timeline)
-- search for a focus stock and see its top and bottom k neighbours
-- build a basket of up to 150 stocks and see its heatmap
-- see the distribution of all 12.5M pairwise ρ on that date
-- follow one pair through time
-- download the full 5,000 × 5,000 matrix as float16 `.npy` (50 MB)
-
-Every view is encoded in the URL (`?date=&focus=&tickers=&pair=`), so it can be shared and survives a reload.
-
-### UI tour
-
-`app/web` is Vite + React 18 + TypeScript, with `@tanstack/react-query` and ECharts via `echarts-for-react`. It has one typed client (`src/api.ts`), one query hook per endpoint (`src/hooks.ts`), and plain CSS with variables in `src/styles.css`.
-
-| Area | What it shows |
-|---|---|
-| Header | Selected date, `n_valid`, and ◀ ▶ through dates that have a valid window. The date input is limited to [first valid, last]; any other date snaps to the nearest valid one and says so. The download button shows the size (50.0 MB). There is also a light / dark / system theme toggle. |
-| Timeline | Mean pairwise ρ with a ±1 std band. Click to select a date. The selected date is marked, and re-base and placeholder days are annotated. Wheel or slider to zoom. |
-| Neighbours | ARIA combobox (≤ 50 matches; arrows, Enter, Esc) and a k selector (10/20/50/100). Top and bottom k with inline diverging bars. A row click charts the pair, a "Focus" button re-centres on that stock, and "Add top 10 to heatmap" extends the basket. When the focus stock has no valid window it shows an explicit empty state. |
-| Heatmap | A basket of up to 150 chips, with add, remove, clear and "seed: focus + top 14" (the first-load default). Fixed diverging blue–gray–red scale on [−1, 1] with a legend. Undefined cells are hatched gray with an "n/a" tooltip. A cell click charts the pair. |
-| Distribution | Histogram of all pairs on the date, with the reference curve for independent series of length W. Mean, std and `n_valid` are shown below. |
-| Pair chart | ρ(a, b) over time on a fixed [−1, 1] axis, with a marker at the selected date. Gaps appear where either stock lacks a window. |
-
-UX details:
-- Fixed-height panels with skeletons, so nothing shifts while loading.
-- During refetches the previous data stays on screen (`keepPreviousData`), dimmed.
-- Errors show the API's `detail` message.
-- Charts resize with their containers.
-- No horizontal overflow at 390px (checked).
+*Screenshot: the synthetic demo dataset (`make demo`). It is labelled "Synthetic demo data" in the app.*
 
 ---
 
-## 2. Quickstart
+## 1. Quick start
 
-You need Python ≥ 3.11 and Node ≥ 20.19 (for Vite 7). Put the source data at `data/raw/stock_data.zip`. It is never extracted and never committed; every CLI also accepts `--zip PATH`.
+You need Python ≥ 3.11 and Node ≥ 20.19.
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt && pip install -e .
-
-make audit        # reports/data_audit.md            (~25 s)
-make build-data   # data/processed/* artifacts        (~75-80 s on 4 cores)
-make test         # 72 tests                          (~2 s)
-make bench        # reports/bench.md                  (~10 s)
-
-make api          # API on http://localhost:8000      (docs: /docs)
-make web          # dev UI on http://localhost:5173   (proxies /api to :8000)
+(cd app/web && npm ci)
 ```
 
-Instead of the dev server you can run `make web-build`, which is `cd app/web && npm ci && npm run build`. The API then serves the built UI at `http://localhost:8000/`. `make all` runs install, audit, build-data, test, bench and web-build in order.
+| Goal | Command | Notes |
+|---|---|---|
+| **Demo, no private data needed** | `make demo` | Generates a deterministic synthetic dataset, builds it, builds the UI and serves everything on http://localhost:8000. |
+| Demo update events | `make demo-update` | Publishes two new snapshots: one appends the next business day, the other corrects a historical price. The running app picks them up within ~2 s. |
+| Real dataset | put the zip at `data/raw/stock_data.zip`, then `make audit build-data api` | Audit ≈ 25 s, build ≈ 70 s on 4 cores. |
+| Add or correct days | `make ingest FILES="path/20240909.csv" REASON="..."` | Creates a new snapshot; only the affected windows are recomputed. |
+| Inspect or roll back versions | `make snapshots ARGS="list"`, `ARGS="rollback v0001-…"` | `verify`, `prune --keep N` and `unlock` are also available. |
+| Frontend dev server | `make web` | http://localhost:5173, proxying `/api` to `:8000`. |
+| Tests | `make test` and `cd app/web && npm run lint && npm run build` | One command each. |
+| Benchmarks | `make bench` | Writes `reports/bench.md`. |
 
-**Without `make` (e.g. Windows `cmd`)**, run the same steps by hand:
+Without `make` (for example on Windows), run the same Python modules directly:
 
 ```bat
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-pip install -e .
-python -m corrlib.audit --zip data\raw\stock_data.zip --out reports\data_audit.md
-python -m corrlib.build --zip data\raw\stock_data.zip --out data\processed
+python -m corrlib.demo --out data\demo
+python -m corrlib.build --zip data\demo\demo_stock_data.zip --out data\demo\store
+set CORR_DATA_DIR=data\demo\store && python -m uvicorn app.api.main:app --port 8000
+python -m corrlib.ingest --root data\demo\store data\demo\updates\append\20240415.csv
 python -m pytest -q
-python scripts\bench.py --data data\processed --out reports\bench.md
-python -m uvicorn app.api.main:app --port 8000
-cd app\web && npm ci && npm run dev
 ```
 
-The API reads its artifacts from `CORR_DATA_DIR` (default `data/processed`, relative to the working directory).
-
 ---
 
-## 3. Data audit findings
+## 2. What the brief asked for, and where it lives
 
-The full report is [`reports/data_audit.md`](reports/data_audit.md), generated by `python -m corrlib.audit` from the real zip (sha256 `ecab8196…d7d09ffac`).
-
-| What | Finding |
+| Requirement | Where |
 |---|---|
-| Files | 900 daily files, `20200101` to `20240906`, 5,000 rows each (4.5M rows). One skipped entry: the `stock_data/` directory. No weekend files. |
-| Calendar | Five blocks of about 180 files, each running from Jan 1 to Sep 8. Gaps of 114–116 days separate them. |
-| Tickers | 5,000. Every ticker appears in every file. `NA` is present on 900/900 dates (read as text). |
-| Dates | 10,000 rows (two whole files: 2021-02-22 and 2022-05-30) use `M/D/YYYY`. They match their file date. No mismatched or unparseable dates. |
-| Prices | 6 empty prices, all on 2022-05-30 (`BKRP DAF PDY TVT UJK WJX`). No non-numeric, ≤ 0 or infinite prices. No duplicate `(ticker, date)` rows and no ticker whitespace or case problems. |
-| **Uniform-price days** | **Six dates where every one of the 5,000 prices is identical** (§9 below explains the handling).<br>• **Re-bases at 20.0:** 2020-01-01, 2020-12-31, 2021-12-31, 2023-01-02, 2024-01-01. Each starts a new block.<br>• **Placeholder at 1.0:** 2021-02-22. |
-| Returns (after handling) | std 0.0609, 1%/99% quantiles −0.165 / +0.165, max abs 0.443. 6,515 returns have abs > 0.25 and none has abs > 0.5. |
-| Returns (naive, no handling) | std 0.824, max **+747×**, 19,101 returns with abs > 0.5. Almost all are artifacts of the six uniform days. |
-| Seed day 2020-01-01 | Its next-day returns look like every other day's: 1%/50%/99% = −0.161 / −0.001 / +0.170, std 0.0609 vs 0.0609. **Kept.** |
-| Coverage | Every ticker has a valid price on ≥ 99.78% of dates. The worst six are the 2022-05-30 empty prices. |
-| Validity | 88.52% of stock-dates (t ≥ W) are valid; no window has zero variance. The first valid window is **2020-01-29** (index 20). 101 later dates have no valid window: the 20 dates after each re-base and 21 after the placeholder. |
-| **Cross-section** | Per-date mean ρ is between −0.0001 and +0.0002, and the std of ρ is 0.2294 = 1/√(W−1). Over the full sample, the std is 0.0335 = 1/√(n−1) and the max abs ρ is 0.177. |
-
-**The stocks behave like independent random walks with no common factor.** Every trailing-window correlation in this data set is sampling noise around zero. That is why the histogram panel overlays the distribution expected for independent series: the bars track it on every date.
-
-The app is built to be correct on any data; this particular data simply has no signal.
+| Read daily CSVs directly from one zip (no extraction) | `corrlib/io.py`: streams members and validates the header. Tickers are read as text, so the real ticker `NA` survives. |
+| Clean and validate data, counting every issue | `corrlib/clean.py` (per-file rules and `IssueCounts`), `corrlib/returns.py` (uniform-price anomaly records) |
+| Trailing 20-day correlations for ~5,000 stocks | `corrlib/corr.py`: pure numpy, `C = ZᵀZ` on standardised windows |
+| Efficient on-disk storage, no database | `corrlib/store.py` and `corrlib/snapshots.py`: `.npy` memmap, Parquet, JSON, plus an atomic pointer file |
+| Python API | `app/api/` (FastAPI, `/docs`) |
+| React UI to explore by date | `app/web/` (Vite, React, TypeScript, TanStack Query, ECharts, Tailwind with Aceternity-style components) |
+| Tests | `tests/` (pytest), `app/web/src/**/*.test.ts(x)` (vitest) |
+| Docs and reproducibility | This README, `reports/data_audit.md`, `reports/bench.md`, `make demo` |
 
 ---
 
-## 4. Approach & math
+## 3. Architecture and trade-offs
 
-**Calendar and axes.** The trading calendar is the sorted set of file dates, and the file name is authoritative. `T` = 900 dates. `N` = 5,000 tickers (the union over files, sorted). Both axes are saved to disk, so every array is addressed by integer index.
+```
+ stock_data.zip ─► io (stream) ─► clean (per file) ─► wide prices [T×N] ─► uniform-day records ─► returns [T×N]
+                                                                                                   │
+            ┌───────────────────────── snapshot v000k (immutable directory) ◄──────────────────────┘
+            │  returns.npy (float32, memmap) · prices.parquet (raw + used) · daily_stats · hist · anomalies.json
+            │  inputs.json (sha256 of every source day) · manifest.json (checksums, policy, changes)
+            ▼
+   CURRENT ──► FastAPI registry (one snapshot per request, ?snapshot= pinning) ──► React UI (snapshot id in every query key)
+            ▲
+ corrlib.ingest (new dates / corrections) ── builds v000k+1 from the parent snapshot, recomputes only affected windows
+```
 
-**Prices and returns.** `P` is `[T × N]` float64, with NaN for anything missing or invalid. Simple returns are `R[t,i] = P[t,i] / P[t−1,i] − 1`:
-- `R[0]` is NaN.
-- A NaN on either side gives NaN; nothing is ever forward-filled.
-- Returns *into* a re-base day are NaN (§9).
-
-**Window.** The correlation as of date `t` uses `R[t−W+1 .. t]` with W = 20, which spans 21 prices. The first date with a window is `t = W`.
-
-**Validity (complete observations only).** Stock `i` is valid at `t` if:
-- all W of its returns are finite, and
-- its centred window norm is > `1e-12`.
-
-Invalid stocks get NaN correlations with everything, including themselves. `n_valid(t)` is reported everywhere.
-
-**Prepared window.** For each valid stock, `z_i = (x − mean x) / ‖x − mean x‖₂`. Stacking these gives `Z ∈ ℝ^{W×N}`, and Pearson correlation becomes a dot product: `ρ_ij = z_iᵀ z_j`, i.e. `C = ZᵀZ`.
-
-This identity holds only because every valid column uses the same W observations, which is why the rule is "complete observations". All of `corrlib.corr` is built on it.
-
-**Aggregates without an N × N matrix.** Over the `N_v` valid columns, with `s = Σ z_i`:
-- `Σ_{i≠j} ρ_ij = ‖s‖² − N_v`
-- `Σ_{i≠j} ρ_ij² = ‖ZZᵀ‖_F² − N_v` (`ZZᵀ` is only W × W)
-
-Dividing by `N_v(N_v − 1)` gives the mean and the mean square over unique pairs. From those comes the population std (ddof = 0, because the pairs are the whole population). Both are NaN if `N_v < 2`. The histogram does need every pair. It is built from row blocks multiplied only against the columns to their right (the strict upper triangle), in cache-sized float32 blocks.
-
-**Precision.** Returns are stored as float32 and cast to float64 for every window. One-vs-all, subset and pair math is all float64. Only the full-matrix paths (histogram, download) use float32 GEMM. Correlations are clipped to [−1, 1].
-
-**Cost reference** (N = 5,000, W = 20, T = 900):
-
-| Query | Cost | Measured |
-|---|---|---|
-| one stock vs all | O(N·W) = 10⁵ | ~1 ms |
-| subset of k stocks | O(k²·W) | ~1 ms for k = 100 |
-| full matrix for a date | O(N²·W) ≈ 0.5 G multiply-adds | ~30 ms (float32 BLAS), 0.2 s streamed as float16 |
-| one pair over all dates | O(T·W) | ~0.5 ms |
-| mean/std for a date | O(N·W²) | ~1.5 ms |
+- **Store returns, not correlations.**
+  - Returns cost O(T·N): 900 × 5,000 × 4 B = **18 MB**.
+  - Every date's matrix would cost O(T·N²): 900 × 12.5M pairs × 4 B ≈ **45 GB**.
+  - From the returns, one stock against all others takes ~1 ms, a 150-stock matrix ~10 ms, and a full date ~30 ms of BLAS.
+- **Memory-mapped `.npy`.** A query touches only W + 1 contiguous rows. There is no parse step, and the OS page cache is shared between processes.
+- **Precomputed aggregates.** Each date's mean/std of ρ and its 40-bin histogram need all 12.5M pairs (~60 ms per date), so they are computed once per snapshot (~300 kB in total). That makes the timeline and the distribution panel instant.
+- **Bounded memory for the full matrix.** It is streamed in row blocks (256 × N), so the server never holds an N × N matrix.
+- **No database.** Nothing here is relational or needs transactions beyond "publish one complete version". A pointer file swapped with `os.replace` provides that.
+- **Fixed W = 20 with complete observations only (§4).** This is an intentional correctness choice: it keeps `C = ZᵀZ` exact and every view consistent.
+- **Where the design stops scaling:**
+  - **Large universes.** A full matrix grows as N²; at N = 50k, one date is 10 GB as float32. The histogram build cost also grows as N²·T.
+  - **Heavy concurrent full-matrix demand.** It is CPU-bound and capped at 2 concurrent downloads.
+  - **Very frequent updates.** Every snapshot is a full copy, about 60 MB at N = 5,000.
 
 ---
 
-## 5. Storage format and why
+## 4. Data and validity policy (one rule everywhere)
 
-| File | Content | Size | Why |
-|---|---|---:|---|
-| `returns.npy` | float32 `[T × N]`, C order | 18.0 MB | The single source for every correlation. Loaded with `np.load(mmap_mode="r")`: a window is 21 contiguous rows, there is no parse step, and the OS page cache shares it between processes. |
-| `tickers.json`, `dates.json` | fixed axis labels | 50 kB | Stable integer addressing. |
-| `prices.parquet` | long `(date, ticker, price)`, zstd, dictionary-encoded tickers, null = missing or invalid | 36.8 MB | Audit trail and reproducibility. Not read by the API. |
-| `daily_stats.parquet` | `date, n_valid, mean_corr, std_corr` | 18 kB | The timeline: one read instead of 779 × 1.5 ms. |
-| `hist.npy` + `hist_edges.npy` | int64 `[T × 40]` counts of ρ on [−1, 1] | 288 kB | A histogram needs all 12.5M pairs (~60 ms per date), so it is precomputed. |
-| `manifest.json` | source zip sha256 and size, W, T, N, first valid date, issue counts, uniform-day classification, stage timings, corrlib version, sha256 of every artifact | 3 kB | Provenance, reported in `/api/meta`. `corrlib.store.verify_manifest` re-checks it. |
+**Returns.** `R[t] = P[t]/P[t−1] − 1` over the calendar of file dates. `R[0]` is undefined. Nothing is forward-filled: a missing price makes both adjacent returns NaN.
 
-**Size arithmetic.** One date has N(N−1)/2 = 12,497,500 pairs. Storing every date's matrix as float32 upper triangles would cost 900 × 12,497,500 × 4 B ≈ **45 GB**. The returns cost **18 MB**, 2,500 times smaller. From them:
-- any single date's full matrix takes ~30 ms to compute;
-- the queries the UI actually makes (a row, a k × k block, a pair) take about 1 ms.
+**Validity.** A stock's 20-day correlation as of date t is defined only if all of the following hold:
+- t ≥ 20;
+- all 20 returns in its window are finite;
+- the returns are not constant.
 
-So everything is **computed on demand**, and only aggregates that need all pairs or all dates (stats, histograms) are precomputed.
+Otherwise every correlation involving it, **including its correlation with itself**, is undefined. The API returns one of these reason codes:
 
-**Other choices:**
-- **float32 returns.** The relative rounding error (~6e-8) moves ρ by ~1e-7. That is far below the 3 decimals shown and the float16 download (~1e-3).
-- **`.npy` instead of Parquet for returns.** It is memmappable and random-access by row. Parquet would need decompression and a column-to-row transpose for every request.
-- **No database.** Nothing here is relational or mutable, and the brief rules one out.
-- **No HDF5/Zarr.** At 18 MB they would add dependencies without any benefit.
-
-**Atomic publish.** The build writes into a sibling staging directory, checksums everything, then swaps it in with `os.replace`: old → backup, staging → `data/processed`. A failed build leaves the previous artifacts untouched.
-
----
-
-## 6. API reference
-
-FastAPI, with interactive docs at `/docs`. Dates are `YYYY-MM-DD` and tickers are case-insensitive. Every vector and matrix is ordered as `meta.tickers` (alphabetical). Undefined values are JSON `null`, never `NaN` and never 0.
-
-| Method & path | Response |
+| Reason code | Meaning |
 |---|---|
-| `GET /api/health` | `{status, n_tickers, n_dates}` |
-| `GET /api/meta` | `{window, tickers[], dates[], first_valid_date, last_date, default_date, default_ticker, breaks:{rebase_dates[], placeholder_dates[]}, manifest}` |
-| `GET /api/stats/timeline` | `{dates[], mean_corr[], std_corr[], n_valid[]}` |
-| `GET /api/dates/{date}/summary` | `{date, n_valid, n_pairs, mean, std, bin_edges[41], counts[40]}` |
-| `GET /api/corr/{date}/stock/{ticker}?k=20` | `{date, ticker, valid, n_valid, k, top:[{ticker, corr}], bottom:[…]}`; `1 ≤ k ≤ 200` |
-| `GET /api/corr/{date}/matrix?tickers=A,B,C` | `{date, tickers[], valid[], matrix[][]}`; 2–150 unique tickers |
-| `GET /api/corr/pair?a=X&b=Y&start=&end=` | `{a, b, window, dates[], corr[]}`; optional inclusive date range |
-| `GET /api/corr/{date}/row/{ticker}` | `{date, ticker, corr[N]}` |
-| `GET /api/corr/{date}/download` | Streamed `corr_{date}_w20.npy`: float16 `[N × N]`, rows and columns in `meta.tickers` order, NaN for invalid stocks. The server writes the `.npy` header, then yields 256-row blocks, so its memory stays O(256 × N) and it never holds an N × N matrix. |
+| `insufficient_history` | t < W |
+| `missing_returns` | A missing or invalid price, not yet listed, delisted, or a structural break in the window |
+| `constant_returns` | Zero variance, so Pearson correlation is undefined |
 
-`default_date`, `default_ticker` (the first valid ticker on that date) and `breaks` are additions that drive the UI's first load and its annotations.
+Undefined values are `null` in JSON, NaN in exports and hatched "n/a" in the UI. They are never 0 and never ranked.
 
-**Errors** come back as `{"detail": …}` with a proper status code:
+The same `corr.window_status` function drives every view: pair series, row, matrix, rankings, daily summary, histogram and download.
 
-| Case | Status | `detail` |
-|---|---|---|
-| Malformed date or bad parameter | 422 | `{message, date}`, or FastAPI's validation list |
-| Date before the first valid window | 422 | `{message, date, first_valid_date}` |
-| Date not in the calendar | 404 | `{message, date, nearest:[prev, next]}` |
-| Unknown ticker | 404 | `{message, ticker, suggestions[≤10]}` (tickers sharing a prefix, then `difflib` close matches) |
-| Unknown tickers in a matrix | 404 | `{message, unknown:{TICKER: suggestions[]}}` |
-| Matrix with < 2 or > 150 unique tickers | 422 | `{message, count}` |
-| Anything unexpected | 500 | `"Internal server error"` (logged server-side) |
+**Universe.** The universe is the growing union of tickers. A ticker absent on a date is missing that day. Listings and delistings appear as missing history. Symbol renames are not linked.
 
-A date after the first valid window that has no valid window itself (the 101 warm-up dates after a re-base or the placeholder) returns 200 with `valid: false` / `null`s. These are legitimate trading dates with nothing to correlate. The UI never selects them.
+**Uniform-price anomalies (§5).** These are dates where every ticker has the same price. Each one becomes an **evidence record**, served by `/api/meta.anomalies` and in the UI, containing:
+- the original value;
+- the classification (`rebase` / `placeholder` / `unresolved`);
+- the status (`inferred` / `confirmed` / `unresolved`);
+- the rule and its evidence numbers, and the observation dates used;
+- whether the rule **looked ahead** to the next day;
+- the action taken and the window-end dates affected.
+
+Raw prices are never destroyed: `prices.parquet` keeps `price_raw` next to the `price` actually used. Ambiguous cases can be settled with an auditable overrides file (`--overrides`), which marks them `confirmed`.
+
+**Retrospective view.** The rule uses the next day's prices, so the published history is a *retrospectively cleaned* view, not a point-in-time one.
+- Both the API (`view: "retrospective"`) and the UI say so.
+- A uniform **last** date cannot be judged yet. It stays `unresolved` and excluded until the next day arrives. The new snapshot then records the change in `changes.anomaly_changes`; nothing is silently rewritten.
+
+**Deterministic ranking.** Top-k is ordered by (ρ descending, column index ascending), and bottom-k by (ρ ascending, index ascending). It is stable even with thousands of exact ties.
+
+---
+
+## 5. What the real data looks like (`reports/data_audit.md`)
+
+- **Files and rows:** 900 daily files, 2020-01-01 → 2024-09-06, 5,000 tickers in every file (4.5M rows). The ticker `NA` is present.
+- **Date formats:** 10,000 rows (two whole files) use `M/D/YYYY` dates.
+- **Missing prices:** 6, all on 2022-05-30.
+- **No other defects:** no duplicates, non-numeric or non-positive prices, or weekend files.
+- **Calendar:** five yearly blocks of about 180 days, separated by gaps of 114–116 days.
+- **Uniform-price days:**
+  - **Re-bases at 20.0** (2020-01-01, 2020-12-31, 2021-12-31, 2023-01-02, 2024-01-01). Prices continue from 20.0, so only the return *into* each day is undefined.
+  - **One placeholder at 1.0** (2021-02-22). Prices continue from the previous day, so that day's prices are excluded.
+  - All six are `inferred`; the four interior ones used look-ahead.
+  - Without this handling, returns reach 747× and 19,101 exceed 50%. With it, the largest is 44%.
+- **Validity:** the first valid window is 2020-01-29. 101 later dates have no valid window, because their window spans a re-base or the placeholder.
+
+**Statistical reading, kept to what the analysis shows:**
+
+| | |
+|---|---|
+| **Observation** | Per-date mean pairwise ρ stays within ±0.0002, and the per-date std of ρ is 0.229. Over the full sample, pairwise ρ has std 0.0335 and max \|ρ\| 0.177. |
+| **Inference** | These figures are *consistent with the null benchmark of independent series* (std ≈ 1/√(W−1) = 0.229 for W = 20). The cross-section shows no detectable common factor. |
+| **Limitations** | This does **not** prove the stocks are independent, nor that every correlation is noise. Weak factors or nonlinear dependence would not show up in these summaries. |
+
+**Short-window uncertainty and multiple comparisons.**
+- With 20 returns, the sampling std of r near 0 is about 0.23. A 95% Fisher-z interval around r = 0.5 is roughly [0.07, 0.77].
+- A stock's top neighbour among 4,999 candidates will show |ρ| ≈ 0.7 even when nothing is related.
+- The UI therefore shows confidence bands and a null-benchmark guide, and labels top/bottom neighbours as sample correlations, not stable relationships.
+
+---
+
+## 6. API (`/docs` for the live schema)
+
+Every data endpoint accepts `?snapshot=<id>` to pin a version, and every response carries `X-Snapshot-Id`. Errors are always `{"detail": {"code", "message", …}}`.
+
+| Endpoint | Returns |
+|---|---|
+| `GET /api/health` | status, snapshot id, shape |
+| `GET /api/snapshots` · `/api/snapshots/current` · `POST /api/snapshots/reload` | the version list, the current version, and an explicit reload (the server also polls `CURRENT` every 2 s) |
+| `GET /api/meta` | tickers, dates, first valid date, snapshot, `view`, `dataset` (source or demo), `policy`, `anomalies` |
+| `GET /api/stats/timeline` | per-date mean/std of ρ and `n_valid` |
+| `GET /api/dates/{date}/summary` | n_valid, n_pairs, mean, std, histogram, `status` |
+| `GET /api/corr/{date}/stock/{ticker}?k=20` | `valid`, `reason`, top/bottom k (k ≤ 200, deterministic) |
+| `GET /api/corr/{date}/matrix?tickers=A,B,…` | k × k matrix (2–150 tickers), `valid[]`, `reasons[]` |
+| `GET /api/corr/pair?a=&b=&start=&end=` | ρ(a, b) over the date range |
+| `GET /api/corr/{date}/row/{ticker}` | all N correlations (in `meta.tickers` order), `valid`, `reason` |
+| `GET /api/corr/{date}/download?dtype=float32\|float16&format=npz\|npy` | Streamed full matrix. **float32 is the default** (within 1e-6 of the API values); float16 is a size-saving option (within 1e-3). The `npz` file is self-describing: `corr`, `tickers`, and `meta` (date, window, snapshot, dtype, shape, ticker order, invalid semantics). At most 2 concurrent downloads; computation stops when the client disconnects. |
+| `GET /api/corr/{date}/download/info` | exact size, filename and metadata, shown before downloading |
+
+**Error codes:** `invalid_date`, `invalid_input`, `date_not_traded` (with the nearest dates), `date_before_first_window` (with `first_valid_date`), `unknown_ticker` / `unknown_tickers` (with suggestions), `snapshot_not_found`, `too_many_downloads` (429), `not_found`, `internal_error`.
+
+A date inside the calendar with no valid window returns 200 with `null`s and `status: "no_valid_pairs"`.
+
+---
+
+## 7. New data, corrections and publication
 
 ```bash
-curl 'localhost:8000/api/corr/2024-09-06/stock/na?k=3'
-# {"date":"2024-09-06","ticker":"NA","valid":true,"n_valid":5000,"k":3,
-#  "top":[{"ticker":"OA","corr":0.729…},…],"bottom":[{"ticker":"SBPB","corr":-0.677…},…]}
-curl -OJ 'localhost:8000/api/corr/2024-09-06/download'   # corr_2024-09-06_w20.npy (50 MB)
-python -c "import numpy as np; m = np.load('corr_2024-09-06_w20.npy'); print(m.shape, m.dtype)"
+python -m corrlib.ingest --root data/processed 20240909.csv --reason "daily load"   # append
+python -m corrlib.ingest --root data/processed 20230508.csv --reason "vendor fix"   # correction
+python -m corrlib.snapshots --root data/processed list | verify | rollback ID | prune --keep 5 | unlock
 ```
 
----
+**Identity.** A file is identified by its date (from the file name) and the sha256 of its bytes. Every source day's hash is recorded in `inputs.json`, including each base-zip member, so:
+- re-importing identical content is a **no-op**, recorded as `duplicate`;
+- different content for an existing date is a **correction**;
+- a new date is an **append** or an **insert**.
 
-## 7. Performance
+**What gets rebuilt.** The new snapshot is built from the parent's raw prices; the zip is not re-read. Anomalies are re-classified. Return rows are compared by date, and only window-end dates whose window touches a changed return are recomputed; all other aggregates are copied unchanged.
+- A one-price correction at date index p recomputes exactly the 21 window ends p … p+20.
+- On the demo data, an append took 0.16 s end to end and a correction 0.16 s.
 
-From [`reports/bench.md`](reports/bench.md) (`make bench`): in-process, 50 random calls per case after warm-up, on a 4-CPU Linux container with Python 3.13.
+**Publication.** A new snapshot is built in `snapshots/.staging-*`, then verified: checksums, shapes, histogram totals and calendar order. It is renamed into place, and only then is `CURRENT` replaced atomically (temp file + fsync + `os.replace`).
+- An interrupted build or ingest leaves the previous version published and readable.
+- Old snapshots stay on disk for in-flight readers and for rollback until an explicit `prune`, which never removes `CURRENT`.
+- A lock file enforces a single writer.
+- `ingest_log.jsonl` records every attempt with its status (`published` / `duplicate` / `rejected` / `failed`) and reason, so a failed update can simply be re-run.
 
-| Endpoint (TestClient: routing, validation and JSON included) | p50 ms | p95 ms |
-|---|---:|---:|
-| one-vs-all, top/bottom 20 — `/corr/{date}/stock/{ticker}` | 5.5 | 8.3 |
-| full row (5,000 values) — `/corr/{date}/row/{ticker}` | 5.8 | 9.6 |
-| 100-ticker matrix — `/corr/{date}/matrix` | 8.6 | 11.3 |
-| 150-ticker matrix (max) | 11.8 | 15.6 |
-| pair series over all 900 dates — `/corr/pair` | 4.0 | 7.0 |
-| date summary + histogram — `/dates/{date}/summary` | 1.8 | 4.7 |
-| timeline — `/stats/timeline` | 2.2 | 3.6 |
-| meta (5,000 tickers) — `/meta` | 1.8 | 2.8 |
-
-| Full-matrix download (5,000 × 5,000 float16, 50.0 MB) | |
-|---|---:|
-| wall time, real uvicorn over localhost | 0.25 s (204 MB/s) |
-| server RSS before → peak while streaming | 215 MB → 215 MB (+0 MB) |
-| Python heap peak of the body generator | 13.2 MB |
-
-| Core kernel (no HTTP) | p50 ms |
-|---|---:|
-| `prepare_window` + `one_vs_all` | 1.00 |
-| `prepare_window` + `subset_matrix` (k = 100) | 1.09 |
-| `pair_series` (T dates) | 0.44 |
-| `prepare_window` + mean/std aggregates | 1.60 |
-| `prepare_window` + histogram (build, per date) | 59.7 |
-
-**Build:** **73–81 s** end to end on the same machine, well within the 3-minute target. Peak RSS is ~510 MB.
-
-| Stage | Seconds | Share |
-|---|---:|---:|
-| Ingest and clean (900 CSVs streamed from the zip) | 14 | 18% |
-| Wide matrix and returns | 5 | 6% |
-| Per-date aggregates | 55–61 | 75% |
-
-Profiling showed that histogram binning (not the GEMM) dominated the aggregates stage. Binning in 128-row blocks that stay in cache, with a fused scale and `uint8` bincount, cut that stage from 91 s to about 55 s. A thread pool over dates was measured too, and was slower (BLAS already uses all cores), so the loop stays serial.
+**Readers.** The API resolves one snapshot per request and serves it from that snapshot's own immutable files, so a response never mixes versions. While a new snapshot is being built, requests keep being served by the current one. The UI puts the snapshot id in every query key:
+- by default it follows the latest version and offers to switch when a new one is published;
+- a pinned version keeps being served for as long as it exists on disk.
 
 ---
 
-## 8. Testing
+## 8. Performance
+
+Measured by `make bench` on the real data (900 × 5,000) on a 4-CPU Linux container. Full figures, method and cache state are in [`reports/bench.md`](reports/bench.md).
+
+| | Warm, in-process p50 |
+|---|---:|
+| one stock vs all (top/bottom 20) | ~6 ms |
+| 100-ticker matrix | ~9 ms |
+| pair over 900 dates | ~4 ms |
+| full float32 matrix (100 MB) streamed over HTTP | ~0.5 s |
+
+**Build times:**
+- full build from the zip: about 70 s;
+- demo full build: about 2 s;
+- demo append or correction: about 0.2 s.
+
+These are single-machine, warm page-cache numbers, not guarantees. Cold reads add the cost of paging in 21 rows of `returns.npy`, which is small. Full-matrix downloads are CPU-bound and deliberately capped.
+
+---
+
+## 9. Testing
 
 ```bash
-make test                      # or: python -m pytest -q   -> 72 passed
-cd app/web && npm run lint     # eslint (react-hooks rules) + tsc --noEmit
+make test                                  # pytest: io, clean, returns, corr, policy, anomalies, store,
+                                           #   snapshots, ingest, demo, API
+cd app/web && npm run lint && npm run test && npm run build
 ```
 
-`tests/conftest.py` builds a **tiny synthetic zip** in `tmp_path`: 40 business days × 6 tickers (`A AAPL FLAT MSFT NA ZZZ`), fixed-seed random walks starting from a uniform 20.0 seed day. Its injected defects, each mapped to the exact counter it must increment:
-- a duplicate row with an identical price, and one with a conflicting price
-- a whole file of `M/D/YYYY` dates, plus a `YYYYMMDD` date
-- a mismatched date and an unparseable date
-- non-numeric, zero, empty and `inf` prices
-- a missing `NA` row
-- a lowercase or whitespace ticker, and an empty ticker
-- a flat-price ticker
-- `__MACOSX/`, directory and `notes.txt` stray entries
-- members written in shuffled order
-
-| File | Covers |
-|---|---|
-| `test_io.py` | `NA` survives as a string; stray entries skipped; members sorted by date; bad header raises; BOM and whitespace header accepted; two members for one date raise; invalid file-name date skipped. |
-| `test_clean.py` | Every `IssueCounts` counter equals its expected value on the fixture; date formats parametrised; the file-name date wins; conflicting duplicates (including one invalid copy) become NaN; price categories; counts sum. |
-| `test_returns.py` | Hand-computed returns; `R[0]` NaN; a gap gives NaN in both affected returns; break rows; `to_wide`; uniform-day re-base/placeholder classification; the whole fixture panel matches ground truth. |
-| `test_corr.py` | `one_vs_all` vs `np.corrcoef` (atol 1e-10); `pair_series` vs `pandas.rolling(20).corr`; `subset_matrix` is symmetric, has a unit diagonal and equals a slice of `ZᵀZ`; reassembled `iter_full_blocks` equals the full matrix; mean/std vs brute force; histogram sums to `N_v(N_v−1)/2` and equals `np.histogram` in float64; zero-variance stock is NaN including its diagonal; one missing return invalidates exactly the windows that contain it; `t < W` is all invalid; top/bottom-k. |
-| `test_store.py` | Round trip of shapes, dtypes, axes and values; stats/hist consistency; the long prices Parquet; manifest checksums verify and tampering is detected; a failed build leaves the old artifacts in place; publish replaces the directory. |
-| `test_api.py` | Every endpoint's shape; `null` where NaN is expected (no `NaN` in the JSON); case-insensitive tickers; unknown ticker gives 404 with suggestions; early date gives 422 with `first_valid_date`; non-trading or malformed dates; matrix limits (<2, >150) and unknowns; pair ranges; `k` bounds; the download parses with `np.load` and equals the float16 cast of the full matrix. |
-
-**Version matrix:**
-
-| Python | Versions | Result |
-|---|---|---|
-| 3.13 | numpy 2.5, pandas 3.0, pyarrow 26, FastAPI 0.143 | all pass |
-| 3.11 | the `requirements.txt` minimums: numpy 2.0.2, pandas 2.2.2, pyarrow 16.1, FastAPI 0.115, pydantic 2.7 | all pass |
-
-The UI was also checked end to end in headless Chromium against the real data:
-- light and dark mode, the last date and the first valid date, an invalid focus stock, and a 390px viewport;
-- keyboard search, date stepping and snapping, timeline and row clicks, "Add top 10", and URL state surviving a reload;
-- no console errors.
+What the tests cover:
+- **Validity policy:** every edge case on a hand-made reference dataset (missing price, listing, delisting, constant series, t < W).
+- **Rankings:** deterministic, including thousands of exact ties.
+- **Anomalies:** a uniform last date, a re-base, a placeholder, and overrides.
+- **Snapshots:** atomic publish, an interrupted build, rollback, prune and the lock.
+- **Ingest:** duplicate no-op, append equal to a full rebuild, and a correction that changes exactly 21 window ends.
+- **API:** error envelopes, snapshot pinning, the npz export matching the API values, and cross-endpoint agreement.
+- **Frontend:** the stale-result guard in the UI.
 
 ---
 
-## 9. Decisions & assumptions
+## 10. Status
 
-1. **Uniform-price days.**
-   - **The rule.** A real cross-section never has 5,000 identical prices, so such a day is tested by asking which side the next day's prices continue from. The test compares the cross-sectional medians of `|log P[t+1]/P[t]|` and `|log P[t+1]/P[t−1]|`.
-   - **Re-bases** (all four mid-sample 20.0 days: ≈0.031 vs ≈0.44). The paths restart at 20, so the 20.0 prices are valid bases and the day stays in the calendar. The return *into* the day is not a market move (it jumps to 20 after a ~115-day gap), so it is set to NaN. That is 20,000 returns.
-   - **Placeholder** (2021-02-22 at 1.0: 2.96 vs 0.043). The next day continues the previous one, so the 1.0 values are fill-ins and the day's 5,000 prices become NaN. Nothing is bridged or filled.
-   - **Consequence.** Each re-base gives its block a fresh 20-date warm-up, like the start of the data. The placeholder removes 21 windows.
-   - **Without this handling,** 80 windows would be dominated by +700% jumps.
-2. **Seed day 20200101 kept.** Its next-day returns are statistically identical to every later day (std 0.0609 vs 0.0609). It also only ever affects one window (t = 20).
-3. **Calendar = files.** The 114–116-day gaps between blocks are consecutive calendar entries. The only returns that span them end on re-base days, and those are NaN anyway (rule 1).
-   - 2022-05-30 (US Memorial Day) is kept: its prices continue normally (median abs log return in 0.031, out 0.031).
-4. **Accepted `Date` formats:** ISO, `M/D/YYYY` and `YYYYMMDD`, matched by explicit patterns. `D/M/YYYY` is deliberately not accepted because it is ambiguous. The column is only checked; the file-name date is used for every row.
-5. **Duplicates.** Any disagreement between copies, including one valid and one invalid copy, sets the price to NaN rather than picking one. Identical copies collapse to one row.
-6. **Extreme returns are kept.** After rule 1 the largest is 44%, which is consistent with a 6% daily volatility. Nothing is winsorised.
-7. **`first_valid_date`** is the first date with at least 2 valid stocks (2020-01-29, index W). Dates before it give 422. Later dates with fewer than 2 valid stocks give 200 with nulls, and the UI skips them.
-8. **Std of pairwise ρ** is the population std over unique pairs (ddof = 0).
-9. **Histogram:** 40 equal bins on [−1, 1], last bin closed, built in float32. Totals are exact. In float32 a value can occasionally move across a bin edge (tested to ≤ 2 counts against float64).
-10. **Top/bottom-k:** NaN and the query stock are excluded. Results are sorted by value with stable ties.
-11. **ORJSONResponse.** FastAPI 0.143 deprecates its own, so `app/api/schemas.py` keeps an equivalent few-line class. NaN is converted to `None` explicitly before serialisation as well.
-12. **ECharts 6.1** instead of 5.x, because of a moderate XSS advisory (GHSA-fgmj-fm8m-jvvx) in < 6.1.0. ECharts is tree-shaken via `echarts/core`.
-13. **The data was supplied** as `stock_data.zip` on the repository's `main` branch. This branch never commits it: `data/` and `*.zip` are git-ignored.
-14. **Small additions beyond the brief:**
-    - `meta.default_date`, `meta.default_ticker`, `meta.breaks` and `stock.k` in the API;
-    - an `X-Row-Order` header on the download;
-    - the independent-series reference curve on the histogram;
-    - FastAPI serving `app/web/dist` when it has been built;
-    - `reports/screenshot.png`.
+**Implemented now:**
+- everything in §1–§9;
+- an accessible, keyboard-friendly UI with:
+  - shortcuts: ←/→ change date, `/` searches, `?` shows help;
+  - a table view for the heatmap, and focus-trapped dialogs;
+  - Fisher-z confidence bands and a null-benchmark guide;
+  - snapshot awareness, stale-result guards, light and dark mode, and reduced motion.
 
----
+**Not implemented / limitations:**
+- Snapshots are full copies (~60 MB each for the real data); there is no deduplication between versions.
+- Symbol renames are not linked across history.
+- The window is fixed at 20, and there is no pairwise-missing mode; both are deliberate (§4).
+- The API has no authentication or rate limiting beyond the download cap.
+- Benchmarks come from one machine.
+- The anomaly rule cannot tell apart two consecutive uniform days with the same value; that case needs an override.
 
-## 10. Limitations & production extensions
-
-- **Versioned snapshots.** Publish each build to `data/processed/<version>/` with its manifest and flip a `current` pointer atomically (a symlink or a pointer file). The API would reload when the manifest hash changes. Today's swap is two renames with a brief window in which the directory is absent; a pointer flip removes that window and also allows rollback.
-- **Incremental daily append.** A new day appends one row to `returns.npy` and creates exactly one new window. Only that date's aggregates are computed (~60 ms), nothing else changes, and the manifest gets a new version.
-- **Price corrections.** Correcting `P[t, i]` changes `R[t, i]` and `R[t+1, i]`, so it affects the W + 1 window end-dates `t … t+W`. Recompute the aggregates for exactly those dates and bump the version. On-demand endpoints pick it up automatically.
-- **Pairwise deletion option.** Today a single missing return removes a stock from 20 windows.
-  - An optional "pairwise complete observations" mode (with a `min_periods`) would keep more data.
-  - The cost is losing the `C = ZᵀZ` identity: it needs masked sums (counts, Σx, Σy, Σxy, Σx², Σy² as GEMMs over indicator matrices), which is about 5× the work.
-  - Correlations would no longer form a guaranteed positive semi-definite matrix.
-- **Tiled materialisation for heavy all-pairs workloads** (clustering across all dates, rolling network statistics). Compute N × N tiles on demand and cache hot tiles in a chunked store such as Zarr, or run the block GEMMs on a GPU. The histogram builder already uses this blocking.
-- **Caching.** An LRU of prepared `Z` per date (800 kB each) would make repeated queries on one date sub-millisecond. HTTP `ETag`s could be derived from the manifest hash.
-- **Statistical significance.** With 5,000 independent stocks, a top neighbour at |ρ| ≈ 0.7 arises by chance (this data proves it). A production tool should show p-values or FDR-adjusted significance next to ρ, and could offer longer windows.
-- **More window lengths.** The returns are window-agnostic, so aggregates could be built per W and selected with a `?window=` parameter.
-- **Operations.** Rate-limit or authenticate the 50 MB download, add structured access logs, and add health checks that verify the manifest checksums at startup.
+**Possible extensions (not built):**
+- deduplicated or chunked snapshot storage;
+- multiple window lengths;
+- an optional pairwise-complete mode;
+- tile caching for heavy all-pairs workloads;
+- p-values or FDR-adjusted significance next to ρ;
+- auth and quotas for public deployment.

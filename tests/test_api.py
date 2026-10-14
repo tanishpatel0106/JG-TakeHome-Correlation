@@ -18,7 +18,7 @@ FIRST_VALID = 28  # see test_store: first date index with >= 2 valid stocks
 
 @pytest.fixture(scope="module")
 def client(built_dir: Path) -> Iterator[TestClient]:
-    with TestClient(create_app(built_dir)) as c:
+    with TestClient(create_app(built_dir, reload_seconds=0)) as c:
         yield c
 
 
@@ -30,7 +30,9 @@ def dates(fixture_data: FixtureData) -> list[str]:
 def test_health(client: TestClient) -> None:
     r = client.get("/api/health")
     assert r.status_code == 200
-    assert r.json() == {"status": "ok", "n_tickers": 6, "n_dates": 40}
+    body = r.json()
+    assert body == {"status": "ok", "snapshot_id": body["snapshot_id"], "n_tickers": 6, "n_dates": 40}
+    assert body["snapshot_id"].startswith("v0001-") and r.headers["x-snapshot-id"] == body["snapshot_id"]
 
 
 def test_meta(client: TestClient, dates: list[str], fixture_data: FixtureData) -> None:
@@ -43,6 +45,9 @@ def test_meta(client: TestClient, dates: list[str], fixture_data: FixtureData) -
     assert body["default_ticker"] == "A"
     assert body["breaks"] == {"rebase_dates": [dates[0]], "placeholder_dates": []}
     assert body["manifest"]["n_tickers"] == 6 and "artifacts" in body["manifest"]
+    assert body["snapshot"]["id"].startswith("v0001-") and body["view"] == "retrospective"
+    assert body["dataset"]["kind"] == "source" and body["policy"]["window"] == FIXTURE_WINDOW
+    assert isinstance(body["anomalies"], list)
 
 
 def test_timeline_has_nulls_before_first_window(client: TestClient) -> None:
@@ -57,7 +62,7 @@ def test_timeline_has_nulls_before_first_window(client: TestClient) -> None:
 
 def test_summary(client: TestClient, built_dir: Path, dates: list[str]) -> None:
     body = client.get(f"/api/dates/{dates[-1]}/summary").json()
-    assert body["n_valid"] == 5 and body["n_pairs"] == 10
+    assert body["n_valid"] == 5 and body["n_pairs"] == 10 and body["status"] == "ok"
     assert len(body["bin_edges"]) == 41 and len(body["counts"]) == 40
     assert sum(body["counts"]) == 10
     store = load_store(built_dir)
@@ -81,6 +86,7 @@ def test_stock_neighbors(client: TestClient, dates: list[str]) -> None:
 def test_invalid_stock_is_an_empty_200(client: TestClient, dates: list[str]) -> None:
     body = client.get(f"/api/corr/{dates[-1]}/stock/FLAT").json()
     assert body["valid"] is False and body["top"] == [] and body["bottom"] == []
+    assert body["reason"] == "constant_returns"
 
 
 def test_matrix_with_nulls_for_invalid(client: TestClient, dates: list[str]) -> None:
@@ -88,6 +94,7 @@ def test_matrix_with_nulls_for_invalid(client: TestClient, dates: list[str]) -> 
     body = r.json()
     assert body["tickers"] == ["A", "FLAT", "MSFT"]
     assert body["valid"] == [True, False, True]
+    assert body["reasons"] == ["valid", "constant_returns", "valid"]
     m = body["matrix"]
     assert m[0][0] == 1.0 and m[2][2] == 1.0
     assert m[1] == [None, None, None] and [row[1] for row in m] == [None, None, None]
@@ -106,6 +113,7 @@ def test_matrix_ticker_count_limits(client: TestClient, dates: list[str]) -> Non
 def test_matrix_unknown_tickers_listed(client: TestClient, dates: list[str]) -> None:
     r = client.get(f"/api/corr/{dates[-1]}/matrix", params={"tickers": "A,MSFX,ZZQ"})
     assert r.status_code == 404
+    assert r.json()["detail"]["code"] == "unknown_tickers"
     unknown = r.json()["detail"]["unknown"]
     assert set(unknown) == {"MSFX", "ZZQ"}
     assert "MSFT" in unknown["MSFX"]
@@ -136,6 +144,7 @@ def test_row_aligned_with_meta(client: TestClient, dates: list[str]) -> None:
     assert len(body["corr"]) == 6
     assert body["corr"][3] == 1.0
     assert body["corr"][2] is None  # FLAT
+    assert (body["valid"], body["reason"], body["n_valid"]) == (True, "valid", 5)
 
 
 def test_unknown_ticker_404_with_suggestions(client: TestClient, dates: list[str]) -> None:
@@ -164,13 +173,16 @@ def test_date_errors(client: TestClient) -> None:
 def test_k_out_of_range(client: TestClient, dates: list[str]) -> None:
     r = client.get(f"/api/corr/{dates[-1]}/stock/A", params={"k": 201})
     assert r.status_code == 422
-    assert isinstance(r.json()["detail"], list)
+    detail = r.json()["detail"]
+    assert detail["code"] == "invalid_input" and "k" in detail["message"] and detail["errors"]
 
 
-def test_download_is_float16_full_matrix(client: TestClient, built_dir: Path, dates: list[str]) -> None:
-    r = client.get(f"/api/corr/{dates[-1]}/download")
+def test_download_float16_npy_full_matrix(client: TestClient, built_dir: Path, dates: list[str]) -> None:
+    r = client.get(f"/api/corr/{dates[-1]}/download", params={"dtype": "float16", "format": "npy"})
     assert r.status_code == 200
-    assert r.headers["content-disposition"] == f'attachment; filename="corr_{dates[-1]}_w{FIXTURE_WINDOW}.npy"'
+    sid = r.headers["x-snapshot-id"]
+    name = f"corr_{dates[-1]}_w{FIXTURE_WINDOW}_float16_{sid}.npy"
+    assert r.headers["content-disposition"] == f'attachment; filename="{name}"'
     assert int(r.headers["content-length"]) == len(r.content)
     got = np.load(io.BytesIO(r.content))
     assert got.dtype == np.float16 and got.shape == (6, 6)
@@ -191,7 +203,7 @@ def test_download_is_float16_full_matrix(client: TestClient, built_dir: Path, da
 def test_unknown_route_is_json_404(client: TestClient) -> None:
     r = client.get("/api/nope")
     assert r.status_code == 404
-    assert "detail" in r.json()
+    assert r.json()["detail"]["code"] == "not_found"
 
 
 def test_frontend_is_served_once_built(built_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -199,9 +211,9 @@ def test_frontend_is_served_once_built(built_dir: Path, tmp_path: Path, monkeypa
 
     dist = tmp_path / "dist"
     monkeypatch.setattr(main_module, "WEB_DIST", dist)
-    with TestClient(create_app(built_dir)) as c:
+    with TestClient(create_app(built_dir, reload_seconds=0)) as c:
         r = c.get("/")
-        assert r.status_code == 404 and "npm run build" in r.json()["detail"]
+        assert r.status_code == 404 and "npm run build" in r.json()["detail"]["message"]
         dist.mkdir()
         (dist / "index.html").write_text("<!doctype html><title>ok</title>")
         r = c.get("/")

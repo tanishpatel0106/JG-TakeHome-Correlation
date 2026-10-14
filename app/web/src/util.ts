@@ -101,3 +101,76 @@ export function nullCorrCounts(edges: number[], n: number, pairs: number): numbe
   }
   return out;
 }
+
+// --- sampling uncertainty ---------------------------------------------------------
+
+/**
+ * 95% confidence interval for a Pearson correlation from n paired observations
+ * (Fisher z: atanh(r) ± 1.96 / sqrt(n - 3), mapped back with tanh). Null for
+ * undefined r or n <= 3.
+ */
+export function fisherCI(r: number | null | undefined, n: number, zCrit = 1.959964): [number, number] | null {
+  if (r === null || r === undefined || !Number.isFinite(r) || n <= 3) return null;
+  const clipped = Math.max(-0.999999, Math.min(0.999999, r));
+  const z = Math.atanh(clipped);
+  const se = 1 / Math.sqrt(n - 3);
+  return [Math.tanh(z - zCrit * se), Math.tanh(z + zCrit * se)];
+}
+
+/**
+ * Null benchmark for the extremes of a ranking: the expected largest |r| among
+ * `m` independent draws of the sample correlation of two independent normal
+ * series of length n. E[max] = ∫_0^1 (1 - F(x)^m) dx with F the CDF of |r|,
+ * integrated numerically from the null density. A benchmark, not a test: the
+ * candidates in a real cross-section are not independent of one another.
+ */
+export function nullMaxAbsCorr(m: number, n: number, steps = 2000): number {
+  if (m < 1 || n <= 3) return NaN;
+  const logB = logGamma(0.5) + logGamma((n - 2) / 2) - logGamma((n - 1) / 2);
+  const density = (r: number) => (Math.abs(r) >= 1 ? 0 : Math.exp(((n - 4) / 2) * Math.log(1 - r * r) - logB));
+  const h = 1 / steps;
+  let cdf = 0; // P(|r| <= x), density of |r| is 2 f(x)
+  let expected = 0;
+  let prev = 2 * density(0);
+  for (let i = 1; i <= steps; i++) {
+    const x = i * h;
+    const cur = 2 * density(x);
+    const next = Math.min(1, cdf + (h * (prev + cur)) / 2);
+    // trapezoid on 1 - F^m over [x - h, x]
+    expected += (h * (1 - Math.pow(cdf, m) + (1 - Math.pow(next, m)))) / 2;
+    cdf = next;
+    prev = cur;
+  }
+  return expected;
+}
+
+// --- stale-result guard -----------------------------------------------------------
+
+export interface FreshnessExpectation {
+  date: string | null;
+  ticker?: string | null;
+  k?: number;
+  tickers?: string[];
+}
+
+/**
+ * True only when fetched data can safely drive an action: it is not a
+ * keepPreviousData placeholder and it describes exactly the current selection
+ * (date, ticker, k, basket). Anything else is "Updating…".
+ */
+export function isFresh(
+  data: { date: string; ticker?: string; k?: number; tickers?: string[] } | undefined,
+  isPlaceholderData: boolean,
+  expected: FreshnessExpectation,
+): boolean {
+  if (!data || isPlaceholderData || expected.date === null) return false;
+  if (data.date !== expected.date) return false;
+  if (expected.ticker !== undefined && data.ticker !== expected.ticker) return false;
+  if (expected.k !== undefined && data.k !== expected.k) return false;
+  if (expected.tickers !== undefined) {
+    const got = data.tickers ?? [];
+    if (got.length !== expected.tickers.length) return false;
+    for (let i = 0; i < got.length; i++) if (got[i] !== expected.tickers[i]) return false;
+  }
+  return true;
+}

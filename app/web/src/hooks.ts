@@ -9,44 +9,53 @@ export function useMeta() {
   return useQuery({ queryKey: ["meta"], queryFn: ({ signal }) => api.meta(signal), staleTime: Infinity });
 }
 
-export function useTimeline() {
-  return useQuery({ queryKey: ["timeline"], queryFn: ({ signal }) => api.timeline(signal), staleTime: Infinity });
+// Every data query key carries the snapshot id, and every request pins it (?snapshot=),
+// so results from two snapshots can never be mixed. `snap` is null for pre-v2 APIs.
+type Snap = string | null;
+
+export function useTimeline(snap: Snap, ready: boolean) {
+  return useQuery({
+    queryKey: ["timeline", snap],
+    queryFn: ({ signal }) => api.timeline(snap, signal),
+    enabled: ready,
+    staleTime: Infinity,
+  });
 }
 
-export function useSummary(date: string | null) {
+export function useSummary(date: string | null, snap: Snap) {
   return useQuery({
-    queryKey: ["summary", date],
-    queryFn: ({ signal }) => api.summary(date as string, signal),
+    queryKey: ["summary", snap, date],
+    queryFn: ({ signal }) => api.summary(date as string, snap, signal),
     enabled: date !== null,
     placeholderData: keepPreviousData,
     staleTime: Infinity,
   });
 }
 
-export function useNeighbors(date: string | null, ticker: string | null, k: number) {
+export function useNeighbors(date: string | null, ticker: string | null, k: number, snap: Snap) {
   return useQuery({
-    queryKey: ["neighbors", date, ticker, k],
-    queryFn: ({ signal }) => api.neighbors(date as string, ticker as string, k, signal),
+    queryKey: ["neighbors", snap, date, ticker, k],
+    queryFn: ({ signal }) => api.neighbors(date as string, ticker as string, k, snap, signal),
     enabled: date !== null && ticker !== null,
     placeholderData: keepPreviousData,
     staleTime: Infinity,
   });
 }
 
-export function useMatrix(date: string | null, tickers: string[]) {
+export function useMatrix(date: string | null, tickers: string[], snap: Snap) {
   return useQuery({
-    queryKey: ["matrix", date, tickers],
-    queryFn: ({ signal }) => api.matrix(date as string, tickers, signal),
+    queryKey: ["matrix", snap, date, tickers],
+    queryFn: ({ signal }) => api.matrix(date as string, tickers, snap, signal),
     enabled: date !== null && tickers.length >= 2,
     placeholderData: keepPreviousData,
     staleTime: Infinity,
   });
 }
 
-export function usePair(pair: [string, string] | null) {
+export function usePair(pair: [string, string] | null, snap: Snap) {
   return useQuery({
-    queryKey: ["pair", pair?.[0], pair?.[1]],
-    queryFn: ({ signal }) => api.pair(pair![0], pair![1], signal),
+    queryKey: ["pair", snap, pair?.[0], pair?.[1]],
+    queryFn: ({ signal }) => api.pair(pair![0], pair![1], snap, signal),
     enabled: pair !== null,
     placeholderData: keepPreviousData,
     staleTime: Infinity,

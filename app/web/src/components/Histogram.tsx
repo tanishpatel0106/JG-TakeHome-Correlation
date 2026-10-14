@@ -40,7 +40,7 @@ export function Histogram({ summary, window, mode }: HistogramProps) {
         textStyle: { color: t.inkSecondary, fontSize: 11 },
         data: [
           { name: "pairs", icon: "roundRect" },
-          { name: `independent series (n = ${window})`, icon: "path://M0,4 L14,4 L14,6 L0,6 Z" },
+          { name: `Null benchmark: independent series (n = ${window})`, icon: "path://M0,4 L14,4 L14,6 L0,6 Z" },
         ],
       },
       tooltip: {
@@ -57,7 +57,7 @@ export function Histogram({ summary, window, mode }: HistogramProps) {
           return (
             `ρ in [${formatCorr(lo)}, ${formatCorr(hi)}${i === edges.length - 2 ? "]" : ")"}<br/>` +
             `<b>${formatInt(count)}</b> pairs (${share.toFixed(2)}%)<br/>` +
-            `<span style="color:${t.muted}">independent: ${formatInt(Math.round(reference[i] ?? 0))}</span>`
+            `<span style="color:${t.muted}">null benchmark: ${formatInt(Math.round(reference[i] ?? 0))}</span>`
           );
         },
       },
@@ -93,7 +93,7 @@ export function Histogram({ summary, window, mode }: HistogramProps) {
           emphasis: { itemStyle: { color: t.accent, opacity: 0.8 } },
         },
         {
-          name: `independent series (n = ${window})`,
+          name: `Null benchmark: independent series (n = ${window})`,
           type: "line",
           data: curve,
           symbol: "none",

@@ -1,8 +1,9 @@
 # Data audit
 
 - Source: `stock_data.zip` (60.3 MB, sha256 `ecab8196c97b44affa6c41985fd9fc50a571bcf2e74d19f45f3f6e2d7d09ffac`)
-- Generated: 2026-10-14T18:12:38+00:00 by corrlib 0.1.0 (`python -m corrlib.audit`)
+- Generated: 2026-10-14T21:41:03+00:00 by corrlib 0.2.0 (`python -m corrlib.audit`)
 - Window: W = 20 returns; validity threshold ||x - mean|| > 1e-12
+- View: **retrospective** (uniform-day decisions may use the next day's prices; see sections 4 and 9)
 
 ## 1. Files and calendar
 
@@ -73,6 +74,7 @@ cross-sectional median of `|log P[t+1]/P[t]|` (next day continues from the unifo
 
 - Returns set to NaN because they end on a re-base day: 20,000
 - Prices set to NaN on placeholder days: 5,000
+- The raw values are kept: `prices.parquet` stores `price_raw` (per-file cleaning only) next to `price` (used).
 
 ## 5. Price coverage per ticker (after cleaning and placeholder handling)
 
@@ -143,7 +145,7 @@ Std: first 0.0609, later 0.0609.
 - First date with a full window (index W = 20): **2020-01-29**
 - First date with a valid pair: **2020-01-29**
 - Valid stock-dates (complete window and non-zero variance), over dates t >= W: **3,894,874 of 4,400,000 (88.52%)**
-- Stock-dates with a complete window but zero variance (flat prices): 0
+- Stock-dates with a complete window but zero variance (`constant_returns`, flat prices): 0
 - n_valid on dates that have any valid stock: min 4,994, median 5,000, max 5,000
 - Dates at or after index W with fewer than 2 valid stocks: 101
 
@@ -155,18 +157,47 @@ Std: first 0.0609, later 0.0609.
 | 2023-01-02 | 2023-01-27 | 20 | window spans the re-base on 2023-01-02 |
 | 2024-01-01 | 2024-01-26 | 20 | window spans the re-base on 2024-01-01 |
 
-## 8. Cross-sectional dependence
+## 8. Cross-sectional dependence compared with a null benchmark
 
-Per-date pairwise rho over the 779 dates with valid pairs (W = 20):
+**Observation.** Per-date pairwise rho over the 779 dates with valid pairs (W = 20):
 
 - mean rho: min -0.0001, median +0.0000, max +0.0002
 - std of rho: min 0.2293, median 0.2294, max 0.2296
-- for independent series the sample correlation of 20 points has mean 0 and std ~ 1/sqrt(W - 1) = 0.2294
+- **Null benchmark** (an assumption, not a fact about the data): for independent normal series the sample correlation of 20 returns has mean 0 and std ~ 1/sqrt(W - 1) = 0.2294
 
 Full-sample correlation over the 891 dates on which every ticker has a return:
-mean rho +0.00001, std 0.0335 (independent-series value 1/sqrt(n - 1) = 0.0335),
+mean rho +0.00001, std 0.0335 (null benchmark 1/sqrt(n - 1) = 0.0335),
 max abs rho off the diagonal 0.177.
 
-Both are what independent random walks produce: the cross-section has no common factor, so
-trailing-window correlations in this data set are sampling noise around zero.
+**Inference.** Criterion: |median mean rho| <= 0.01 and the median std within 2% of 0.2294.
+
+The per-date distribution of pairwise correlations is **consistent with the null benchmark of independent series**: these summary statistics show no detectable common factor at this window length.
+
+**Limitations.**
+
+- A benchmark match is not a proof: it does **not** show that the stocks are independent, that no common factor exists, or that every individual correlation is noise. Weak or intermittent dependence, or dependence confined to a few pairs, can hide inside a distribution that matches the benchmark.
+- A 20-return correlation is a noisy estimate: around rho = 0 its 95% interval (Fisher z) is about +/-0.44, so measured rho, its uncertainty and any economic usefulness are different things.
+- Multiple comparisons: among 4,999 peers the largest |rho| of independent series is typically about 0.75 (median of the maximum under the benchmark), so an extreme top/bottom neighbour is expected by chance and does not establish a stable relationship.
+
+## 9. Anomaly records (status, evidence, look-ahead)
+
+One record per uniform-price day, exactly as stored in `anomalies.json`. *Status* is `inferred` (decided by the rule), `confirmed` (an override file set it) or `unresolved` (cannot be decided yet). *Look-ahead* means the rule used prices from a later date, so the cleaned history is a **retrospective** view, not a point-in-time one.
+
+| date | classification | status | rule | look-ahead | observation dates | from uniform / from previous (n) | action | affected window ends | override |
+|---|---|---|---|---|---|---|---|---|---|
+| 2020-01-01 | rebase | inferred | `uniform-continuity/v1` | no | 2020-01-01 | - | `none` | none | - |
+| 2020-12-31 | rebase | inferred | `uniform-continuity/v1` | yes | 2020-09-08, 2020-12-31, 2021-01-01 | 0.0308 / 0.4409 (5,000) | `return_into_day_nulled` | 2020-12-31 .. 2021-01-27 (20) | - |
+| 2021-02-22 | placeholder | inferred | `uniform-continuity/v1` | yes | 2021-02-19, 2021-02-22, 2021-02-23 | 2.9578 / 0.0430 (5,000) | `prices_nulled` | 2021-02-22 .. 2021-03-22 (21) | - |
+| 2021-12-31 | rebase | inferred | `uniform-continuity/v1` | yes | 2021-09-08, 2021-12-31, 2022-01-03 | 0.0314 / 0.4245 (5,000) | `return_into_day_nulled` | 2021-12-31 .. 2022-01-27 (20) | - |
+| 2023-01-02 | rebase | inferred | `uniform-continuity/v1` | yes | 2022-09-08, 2023-01-02, 2023-01-03 | 0.0307 / 0.4391 (5,000) | `return_into_day_nulled` | 2023-01-02 .. 2023-01-27 (20) | - |
+| 2024-01-01 | rebase | inferred | `uniform-continuity/v1` | yes | 2023-09-08, 2024-01-01, 2024-01-02 | 0.0305 / 0.4397 (5,000) | `return_into_day_nulled` | 2024-01-01 .. 2024-01-26 (20) | - |
+
+Evidence notes:
+
+- 2020-01-01: first date: the price paths start here and R[0] is undefined, so there is nothing to break
+- 2020-12-31: the next day continues from the uniform value (median |log P[t+1]/P[t]| 0.0308 <= 0.4409 from the previous day): re-base
+- 2021-02-22: the next day continues from the previous day (median |log P[t+1]/P[t-1]| 0.0430 < 2.9578 from the uniform value): placeholder
+- 2021-12-31: the next day continues from the uniform value (median |log P[t+1]/P[t]| 0.0314 <= 0.4245 from the previous day): re-base
+- 2023-01-02: the next day continues from the uniform value (median |log P[t+1]/P[t]| 0.0307 <= 0.4391 from the previous day): re-base
+- 2024-01-01: the next day continues from the uniform value (median |log P[t+1]/P[t]| 0.0305 <= 0.4397 from the previous day): re-base
 

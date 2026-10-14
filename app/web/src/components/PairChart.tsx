@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef } from "react";
 import type { PairSeries } from "../api";
 import type { ColorMode } from "../hooks";
 import { axisStyle, baseOption, chartTheme } from "../theme";
-import { escapeHtml, formatCorr, formatDate, formatShortDate } from "../util";
+import { escapeHtml, fisherCI, formatCorr, formatDate, formatShortDate } from "../util";
 import { Chart } from "./Chart";
 
 export const PAIR_HEIGHT = 240;
@@ -27,6 +27,14 @@ export function PairChart({ data, selected, mode, onSelectDate }: PairChartProps
   const option = useMemo<EChartsOption>(() => {
     const t = chartTheme(mode);
     const name = `ρ(${data.a}, ${data.b})`;
+    // 95% Fisher-z band: lower bound (invisible) + band height, stacked.
+    const lower: (number | null)[] = [];
+    const band: (number | null)[] = [];
+    for (let i = 0; i < data.corr.length; i++) {
+      const ci = fisherCI(data.corr[i], data.window);
+      lower.push(ci ? ci[0] : null);
+      band.push(ci ? ci[1] - ci[0] : null);
+    }
     return {
       ...baseOption(t),
       grid: { left: 44, right: 56, top: 24, bottom: 56 },
@@ -39,9 +47,11 @@ export function PairChart({ data, selected, mode, onSelectDate }: PairChartProps
           if (!first) return "";
           const i = first.dataIndex;
           const value = data.corr[i];
+          const ci = fisherCI(value, data.window);
           return (
             `<b>${escapeHtml(formatDate(data.dates[i]!))}</b><br/>` +
             `${escapeHtml(name)} <b>${formatCorr(value)}</b>` +
+            (ci ? `<br/><span style="color:${t.muted}">95% CI ${formatCorr(ci[0])} … ${formatCorr(ci[1])}</span>` : "") +
             (value === null || value === undefined
               ? `<br/><span style="color:${t.muted}">no complete ${data.window}-return window</span>`
               : "")
@@ -78,6 +88,27 @@ export function PairChart({ data, selected, mode, onSelectDate }: PairChartProps
         },
       ],
       series: [
+        {
+          name: "ci-lower",
+          type: "line",
+          data: lower,
+          stack: "ci",
+          stackStrategy: "all",
+          symbol: "none",
+          lineStyle: { opacity: 0 },
+          silent: true,
+        },
+        {
+          name: "95% CI",
+          type: "line",
+          data: band,
+          stack: "ci",
+          stackStrategy: "all",
+          symbol: "none",
+          lineStyle: { opacity: 0 },
+          areaStyle: { color: t.accentWash },
+          silent: true,
+        },
         {
           name,
           type: "line",
