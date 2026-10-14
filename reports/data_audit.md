@@ -1,7 +1,7 @@
 # Data audit
 
 - Source: `stock_data.zip` (60.3 MB, sha256 `ecab8196c97b44affa6c41985fd9fc50a571bcf2e74d19f45f3f6e2d7d09ffac`)
-- Generated: 2026-10-14T17:49:25+00:00 by corrlib 0.1.0 (`python -m corrlib.audit`)
+- Generated: 2026-10-14T18:12:38+00:00 by corrlib 0.1.0 (`python -m corrlib.audit`)
 - Window: W = 20 returns; validity threshold ||x - mean|| > 1e-12
 
 ## 1. Files and calendar
