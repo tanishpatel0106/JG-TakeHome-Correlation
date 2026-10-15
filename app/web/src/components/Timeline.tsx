@@ -1,11 +1,11 @@
 import type { ECharts, EChartsOption } from "echarts";
-import { useEffect, useMemo, useRef } from "react";
+import { useMemo } from "react";
 
 import type { Breaks, Timeline as TimelineData } from "../api";
 import type { ColorMode } from "../hooks";
 import { axisStyle, baseOption, chartTheme } from "../theme";
 import { escapeHtml, formatCorr, formatDate, formatInt, formatShortDate } from "../util";
-import { Chart } from "./Chart";
+import { Chart, categoryAt } from "./Chart";
 
 const HEIGHT = 230;
 
@@ -19,18 +19,10 @@ interface TimelineProps {
 
 /** Mean pairwise rho per date with a +/- 1 std band; click a date to select it. */
 export function Timeline({ data, breaks, selected, mode, onSelect }: TimelineProps) {
-  // The zrender click handler is bound once; it reads the latest props from this ref.
-  const latest = useRef({ dates: data.dates, onSelect });
-  const chartRef = useRef<ECharts | null>(null);
-  useEffect(() => {
-    latest.current = { dates: data.dates, onSelect };
-  }, [data.dates, onSelect]);
-
-  useEffect(() => {
-    return () => {
-      chartRef.current?.getZr().off("click");
-    };
-  }, []);
+  function onCanvasClick(chart: ECharts, x: number, y: number) {
+    const i = categoryAt(chart, x, y, data.dates.length);
+    if (i !== null) onSelect(data.dates[i]!);
+  }
 
   const option = useMemo<EChartsOption>(() => {
     const t = chartTheme(mode);
@@ -154,19 +146,5 @@ export function Timeline({ data, breaks, selected, mode, onSelect }: TimelinePro
     };
   }, [data, breaks, selected, mode]);
 
-  function onReady(chart: ECharts) {
-    chartRef.current = chart;
-    chart.getZr().off("click");
-    chart.getZr().on("click", (event: { offsetX: number; offsetY: number }) => {
-      const point = [event.offsetX, event.offsetY];
-      if (!chart.containPixel({ gridIndex: 0 }, point)) return;
-      const index = chart.convertFromPixel({ xAxisIndex: 0 }, point[0]!);
-      const i = Math.round(Array.isArray(index) ? (index[0] as number) : (index as number));
-      const { dates, onSelect: select } = latest.current;
-      const date = dates[Math.max(0, Math.min(dates.length - 1, i))];
-      if (date) select(date);
-    });
-  }
-
-  return <Chart option={option} height={HEIGHT} label="Mean pairwise correlation over time" onReady={onReady} />;
+  return <Chart option={option} height={HEIGHT} label="Mean pairwise correlation over time" onCanvasClick={onCanvasClick} />;
 }

@@ -29,7 +29,7 @@ pip install -r requirements.txt && pip install -e .
 | Add or correct days | `make ingest FILES="path/20240909.csv" REASON="..."` | Creates a new snapshot; only the affected windows are recomputed. |
 | Inspect or roll back versions | `make snapshots ARGS="list"`, `ARGS="rollback v0001-…"` | `verify`, `prune --keep N` and `unlock` are also available. |
 | Frontend dev server | `make web` | http://localhost:5173, proxying `/api` to `:8000`. |
-| Tests | `make test`, then `cd app/web && npm run lint && npm run test && npm run build` | Python suite; frontend lint, unit tests, production build. |
+| Tests | `make test`, then `cd app/web && npm run lint && npm run test && npm run build`, then `make e2e` | Python suite; frontend lint, unit tests, production build; browser regressions against the real API (first time: `cd app/web && npx playwright install chromium`). |
 | Benchmarks | `make bench` | Writes `reports/bench.md`. |
 
 Without `make` (for example on Windows), run the same Python modules directly:
@@ -214,6 +214,14 @@ python -m corrlib.snapshots --root data/processed list | verify | rollback ID | 
 
 **Downloads in flight.** A full-matrix download captures its snapshot when it starts, and finishes from it even if a newer snapshot is published meanwhile. At most 2 downloads run at once; a third gets 429 `too_many_downloads` with `Retry-After`. If the client disconnects, the server stops computing within a block and frees the slot. `tests/test_api_streaming.py` checks all three against a live server.
 
+**Downloads in the UI.** The dialog fetches the file itself instead of handing a link to the browser, so it can report what happened:
+- progress while the file arrives, and "Saved … (complete)" only when the byte count equals `Content-Length`;
+- a 429, any other API error, or a dropped connection is shown in the dialog with the reason and a **Retry download** button; nothing is saved;
+- if `/download/info` fails, the error is shown and the download button stays disabled until a retry succeeds;
+- closing the dialog, or changing the options, date or version, cancels a download in progress.
+
+The browser holds the file in memory until it is complete (100 MB for float32 on the real data). For scripted or repeated downloads, use the API directly (`curl -OJ …/download`).
+
 ---
 
 ## 8. Performance
@@ -257,6 +265,7 @@ These are single-machine numbers, not guarantees. Not measured: multiple workers
 make test                                  # pytest: io, clean, returns, corr, policy, anomalies, store,
                                            #   snapshots, ingest, demo, API
 cd app/web && npm run lint && npm run test && npm run build
+make e2e                                   # Playwright, real API + built UI (app/web/e2e/)
 ```
 
 What the tests cover:
@@ -273,6 +282,14 @@ What the tests cover:
   - a snapshot published during an active download.
   Block production is gated by a semaphore the test controls, so there are no timing sleeps.
 - **Frontend:** the stale-result guard in the UI.
+- **Browser regressions** (`make e2e`, Playwright against the real API and the built UI on a throwaway demo store; `app/web/e2e/server.py` adds test-only controls under `/__e2e` to publish a snapshot, hold downloads in flight or drop a stream):
+  - publish two new versions while the app is open, click **Switch to latest** each time, and check the charts remount without errors and the timeline still responds to clicks;
+  - a real cap-induced 429 shown in the download dialog, then a successful retry once a slot is free;
+  - a stream dropped mid-download is reported and nothing is saved;
+  - a failing `/download/info` blocks the download until a retry succeeds;
+  - a failed "Seed" request (503) is reported, keeps the heatmap tickers, and can be retried.
+
+  Every test also fails on any uncaught error or unhandled promise rejection in the page. All five fail on the code before these fixes.
 
 ---
 

@@ -19,7 +19,7 @@ DEMO_DIR   ?= data/demo
 DEMO_STORE ?= $(DEMO_DIR)/store
 
 .PHONY: install install-py install-web audit build-data ingest snapshots api web web-build test bench all clean clean-store \
-	demo-data demo-update demo-api demo bench-demo
+	demo-data demo-update demo-api demo bench-demo e2e
 
 install: install-py install-web
 
@@ -57,6 +57,11 @@ web-build:
 
 test:
 	$(PY) -m pytest -q
+
+# Browser regressions (version switch, download errors, seed errors) against the real API on a throwaway
+# demo store (app/web/e2e/server.py). First time only: cd app/web && npx playwright install chromium
+e2e: web-build
+	cd app/web && PYTHON="$$(cd ../.. && $(PY) -c 'import sys; print(sys.executable)')" npx playwright test
 
 # Benchmarks the published store $(ROOT) (build it first: make build-data). Writes reports/bench.md.
 bench:

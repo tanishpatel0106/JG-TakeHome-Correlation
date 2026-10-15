@@ -20,6 +20,8 @@ dist/
 node_modules/
 app/web/dist/
 app/web/*.tsbuildinfo
+app/web/test-results/
+app/web/playwright-report/
 
 # OS / editors
 .DS_Store

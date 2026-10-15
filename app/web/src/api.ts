@@ -164,16 +164,66 @@ async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
     if ((err as Error).name === "AbortError") throw err;
     throw new ApiError(0, "Cannot reach the API. Is the server running?", null);
   }
-  if (!response.ok) {
-    let detail: unknown = null;
-    try {
-      detail = ((await response.json()) as { detail?: unknown }).detail;
-    } catch {
-      // non-JSON error body
-    }
-    throw new ApiError(response.status, detailMessage(detail, `Request failed (${response.status})`), detail);
-  }
+  if (!response.ok) throw await responseError(response);
   return (await response.json()) as T;
+}
+
+async function responseError(response: Response): Promise<ApiError> {
+  let detail: unknown = null;
+  try {
+    detail = ((await response.json()) as { detail?: unknown }).detail;
+  } catch {
+    // non-JSON error body
+  }
+  let message = detailMessage(detail, `Request failed (${response.status})`);
+  const retryAfter = response.headers.get("Retry-After");
+  if (retryAfter && /^\d+$/.test(retryAfter)) message += ` (retry in about ${retryAfter} s)`;
+  return new ApiError(response.status, message, detail);
+}
+
+/**
+ * Fetch a full-matrix file, reporting progress, and return it only if it arrived complete
+ * (byte count equal to Content-Length). HTTP errors and dropped streams throw an ApiError;
+ * an abort rethrows the AbortError.
+ */
+export async function fetchDownload(
+  url: string,
+  onProgress: (received: number, total: number | null) => void,
+  signal: AbortSignal,
+): Promise<Blob> {
+  let response: Response;
+  try {
+    response = await fetch(url, { signal });
+  } catch (err) {
+    if ((err as Error).name === "AbortError") throw err;
+    throw new ApiError(0, "Cannot reach the API. Is the server running?", null);
+  }
+  if (!response.ok) throw await responseError(response);
+  const length = Number(response.headers.get("Content-Length"));
+  const total = Number.isFinite(length) && length > 0 ? length : null;
+  const chunks: Uint8Array<ArrayBuffer>[] = [];
+  let received = 0;
+  try {
+    const reader = response.body!.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      received += value.byteLength;
+      onProgress(received, total);
+    }
+  } catch (err) {
+    if ((err as Error).name === "AbortError") throw err;
+    throw new ApiError(0, `The connection dropped after ${received.toLocaleString()} bytes; nothing was saved.`, {
+      code: "download_interrupted",
+    });
+  }
+  if (total !== null && received !== total) {
+    throw new ApiError(0, `Incomplete download: ${received.toLocaleString()} of ${total.toLocaleString()} bytes; nothing was saved.`, {
+      code: "download_incomplete",
+    });
+  }
+  return new Blob(chunks, { type: response.headers.get("Content-Type") ?? "application/octet-stream" });
 }
 
 const enc = encodeURIComponent;

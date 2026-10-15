@@ -1,11 +1,11 @@
 import type { ECharts, EChartsOption } from "echarts";
-import { useEffect, useMemo, useRef } from "react";
+import { useMemo } from "react";
 
 import type { PairSeries } from "../api";
 import type { ColorMode } from "../hooks";
 import { axisStyle, baseOption, chartTheme } from "../theme";
 import { escapeHtml, fisherCI, formatCorr, formatDate, formatShortDate } from "../util";
-import { Chart } from "./Chart";
+import { Chart, categoryAt } from "./Chart";
 
 export const PAIR_HEIGHT = 240;
 
@@ -18,11 +18,10 @@ interface PairChartProps {
 
 /** rho(a, b) over time on a fixed [-1, 1] axis, with the selected date marked. */
 export function PairChart({ data, selected, mode, onSelectDate }: PairChartProps) {
-  // The zrender click handler is bound once; it reads the latest props from this ref.
-  const latest = useRef({ dates: data.dates, onSelect: onSelectDate });
-  useEffect(() => {
-    latest.current = { dates: data.dates, onSelect: onSelectDate };
-  }, [data.dates, onSelectDate]);
+  function onCanvasClick(chart: ECharts, x: number, y: number) {
+    const i = categoryAt(chart, x, y, data.dates.length);
+    if (i !== null) onSelectDate(data.dates[i]!);
+  }
 
   const option = useMemo<EChartsOption>(() => {
     const t = chartTheme(mode);
@@ -135,20 +134,7 @@ export function PairChart({ data, selected, mode, onSelectDate }: PairChartProps
     };
   }, [data, selected, mode]);
 
-  function onReady(chart: ECharts) {
-    chart.getZr().off("click");
-    chart.getZr().on("click", (event: { offsetX: number; offsetY: number }) => {
-      const point = [event.offsetX, event.offsetY];
-      if (!chart.containPixel({ gridIndex: 0 }, point)) return;
-      const index = chart.convertFromPixel({ xAxisIndex: 0 }, point[0]!);
-      const i = Math.round(Array.isArray(index) ? (index[0] as number) : (index as number));
-      const { dates, onSelect: select } = latest.current;
-      const date = dates[Math.max(0, Math.min(dates.length - 1, i))];
-      if (date) select(date);
-    });
-  }
-
   return (
-    <Chart option={option} height={PAIR_HEIGHT} label={`Correlation of ${data.a} and ${data.b} over time`} onReady={onReady} />
+    <Chart option={option} height={PAIR_HEIGHT} label={`Correlation of ${data.a} and ${data.b} over time`} onCanvasClick={onCanvasClick} />
   );
 }

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   api,
+  fetchDownload,
   type DownloadDtype,
   type DownloadFormat,
   type Meta,
@@ -270,19 +271,31 @@ function Explorer({ meta, timeline, snap, mode, choice, onCycleTheme }: Explorer
     }));
   }, [neighbors.data, neighborsFresh]);
 
+  // Seeding fetches neighbours on demand; failures are shown next to the button and leave the basket as it was.
+  const [seed, setSeed] = useState<{ phase: "idle" | "loading" | "error"; message?: string; date?: string; focus?: string }>({
+    phase: "idle",
+  });
   const seedFromFocus = useCallback(async () => {
     if (!date || !view.focus) return;
     const focus = view.focus;
-    const data = await queryClient.fetchQuery({
-      queryKey: ["neighbors", snap, date, focus, SEED_NEIGHBORS],
-      queryFn: ({ signal }) => api.neighbors(date, focus, SEED_NEIGHBORS, snap, signal),
-      staleTime: Infinity,
-    });
-    const tickers = [data.ticker];
-    for (let i = 0; i < data.top.length; i++) tickers.push(data.top[i]!.ticker);
-    // Only apply if the selection did not move on while the request was in flight.
-    setView((v) => (v.date === date && v.focus === focus ? { ...v, basket: tickers } : v));
+    setSeed({ phase: "loading", date, focus });
+    try {
+      const data = await queryClient.fetchQuery({
+        queryKey: ["neighbors", snap, date, focus, SEED_NEIGHBORS],
+        queryFn: ({ signal }) => api.neighbors(date, focus, SEED_NEIGHBORS, snap, signal),
+        staleTime: Infinity,
+      });
+      const tickers = [data.ticker];
+      for (let i = 0; i < data.top.length; i++) tickers.push(data.top[i]!.ticker);
+      // Only apply if the selection did not move on while the request was in flight.
+      setView((v) => (v.date === date && v.focus === focus ? { ...v, basket: tickers } : v));
+      setSeed({ phase: "idle" });
+    } catch (err) {
+      setSeed({ phase: "error", message: (err as Error).message, date, focus });
+    }
   }, [date, view.focus, queryClient, snap]);
+  // A seed result or error only describes the selection it was made for.
+  const seedState = seed.date === date && seed.focus === view.focus ? seed.phase : "idle";
 
   // Keyboard shortcuts: ←/→ dates, "/" search, "?" help, "d" download.
   useEffect(() => {
@@ -493,8 +506,14 @@ function Explorer({ meta, timeline, snap, mode, choice, onCycleTheme }: Explorer
                 disabled={view.basket.length >= MAX_BASKET}
               />
             </div>
-            <button type="button" className="button" onClick={() => void seedFromFocus()} disabled={!view.focus}>
-              Seed: focus + top {SEED_NEIGHBORS}
+            <button
+              type="button"
+              className="button"
+              onClick={() => void seedFromFocus()}
+              disabled={!view.focus || seedState === "loading"}
+              aria-busy={seedState === "loading"}
+            >
+              {seedState === "loading" ? "Seeding…" : `Seed: focus + top ${SEED_NEIGHBORS}`}
             </button>
             <button
               type="button"
@@ -505,6 +524,16 @@ function Explorer({ meta, timeline, snap, mode, choice, onCycleTheme }: Explorer
               Clear
             </button>
           </div>
+          {seedState === "error" ? (
+            <div className="mb-2 flex flex-wrap items-center gap-2 rounded-lg bg-warn-wash px-3 py-1.5 text-[12.5px] text-warn" role="alert">
+              <span>
+                <strong>Could not seed from {view.focus}.</strong> {seed.message} The heatmap tickers were left unchanged.
+              </span>
+              <button type="button" className="button small" onClick={() => void seedFromFocus()}>
+                Retry
+              </button>
+            </div>
+          ) : null}
           <ul className="mb-2 flex h-[58px] flex-wrap content-start gap-1 overflow-y-auto" aria-label="Heatmap tickers">
             {view.basket.map((t) => (
               <li key={t} className="chip">
@@ -652,6 +681,55 @@ function MatrixTable({ data }: { data: MatrixResult }) {
   );
 }
 
+type DownloadStatus =
+  | { phase: "idle" }
+  | { phase: "downloading"; received: number; total: number | null }
+  | { phase: "done"; bytes: number; filename: string }
+  | { phase: "error"; message: string };
+
+/** Hand a finished download to the browser as a file. */
+function saveBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
+function DownloadProgress({ status }: { status: DownloadStatus }) {
+  if (status.phase === "downloading") {
+    const pct = status.total ? Math.round((100 * status.received) / status.total) : null;
+    return (
+      <div role="status" className="space-y-1 text-[12.5px] text-ink-2">
+        <progress className="w-full" max={status.total ?? undefined} value={status.received} aria-label="Download progress" />
+        <div>
+          Downloading… {formatBytes(status.received)}
+          {status.total ? ` of ${formatBytes(status.total)} (${pct}%)` : ""}. The file is saved once it has fully arrived; closing
+          this dialog cancels it.
+        </div>
+      </div>
+    );
+  }
+  if (status.phase === "done") {
+    return (
+      <p role="status" className="text-[12.5px] text-ink-2">
+        Saved {status.filename} ({formatBytes(status.bytes)}, complete).
+      </p>
+    );
+  }
+  if (status.phase === "error") {
+    return (
+      <p role="alert" className="rounded-lg bg-warn-wash px-3 py-2 text-[12.5px] text-warn">
+        <strong>Download failed.</strong> {status.message}
+      </p>
+    );
+  }
+  return null;
+}
+
 function DownloadDialog({
   open,
   onClose,
@@ -667,6 +745,8 @@ function DownloadDialog({
 }) {
   const [dtype, setDtype] = useState<DownloadDtype>("float32");
   const [format, setFormat] = useState<DownloadFormat>("npz");
+  const [status, setStatus] = useState<DownloadStatus>({ phase: "idle" });
+  const controller = useRef<AbortController | null>(null);
   const info = useQuery({
     queryKey: ["download-info", snap, date, dtype, format],
     queryFn: ({ signal }) => api.downloadInfo(date, dtype, format, snap, signal),
@@ -677,6 +757,45 @@ function DownloadDialog({
   const estimate = n * n * (dtype === "float32" ? 4 : 2);
   const bytes = info.data?.bytes ?? estimate;
   const filename = info.data?.filename ?? `corr_${date}.${format}`;
+  const busy = status.phase === "downloading";
+
+  // A new request (other options, date or version) or closing the dialog cancels any download in flight.
+  useEffect(() => {
+    controller.current?.abort();
+    controller.current = null;
+    setStatus({ phase: "idle" });
+  }, [open, date, snap, dtype, format]);
+  useEffect(() => () => controller.current?.abort(), []);
+
+  async function start() {
+    controller.current?.abort();
+    const ctrl = new AbortController();
+    controller.current = ctrl;
+    let shown = -1;
+    setStatus({ phase: "downloading", received: 0, total: info.data?.bytes ?? null });
+    try {
+      const blob = await fetchDownload(
+        api.downloadUrl(date, dtype, format, snap),
+        (received, total) => {
+          const pct = total ? Math.floor((100 * received) / total) : Math.floor(received / 1e6);
+          if (pct === shown) return;
+          shown = pct;
+          setStatus({ phase: "downloading", received, total });
+        },
+        ctrl.signal,
+      );
+      if (ctrl.signal.aborted) return;
+      saveBlob(blob, filename);
+      setStatus({ phase: "done", bytes: blob.size, filename });
+    } catch (err) {
+      if (ctrl.signal.aborted) return;
+      setStatus({ phase: "error", message: (err as Error).message });
+    } finally {
+      if (controller.current === ctrl) controller.current = null;
+    }
+  }
+
+  const blocked = info.isError || busy;
   return (
     <Modal
       open={open}
@@ -686,11 +805,11 @@ function DownloadDialog({
       footer={
         <>
           <button type="button" className="button ghost" onClick={onClose}>
-            Cancel
+            {busy ? "Cancel download" : status.phase === "done" ? "Close" : "Cancel"}
           </button>
-          <a className="button primary" href={api.downloadUrl(date, dtype, format, snap)} download={filename} onClick={onClose}>
-            Download {formatBytes(bytes)}
-          </a>
+          <button type="button" className="button primary" onClick={() => void start()} disabled={blocked}>
+            {busy ? "Downloading…" : status.phase === "error" ? "Retry download" : `Download ${formatBytes(bytes)}`}
+          </button>
         </>
       }
     >
@@ -726,6 +845,12 @@ function DownloadDialog({
           {info.data ? `Exact size ${formatBytes(info.data.bytes)}` : `About ${formatBytes(estimate)}`} · invalid stocks are NaN rows and
           columns · snapshot {snap ?? "n/a"}
         </p>
+        {info.isError ? (
+          <Message height={0} tone="error" onRetry={() => void info.refetch()}>
+            <strong>This file cannot be prepared.</strong> {info.error.message}
+          </Message>
+        ) : null}
+        <DownloadProgress status={status} />
         <pre className="overflow-x-auto rounded-lg bg-surface-2 p-3 font-mono text-[12px]">
           {format === "npz"
             ? `import numpy as np, json\nz = np.load("${filename}")\ncorr, tickers = z["corr"], z["tickers"]\nmeta = json.loads(str(z["meta"]))`
